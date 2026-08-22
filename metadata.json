@@ -1,0 +1,6 @@
+{
+  "name": "SWTC NOOS",
+  "description": "Nintendo Switch Emulator Launcher, Virtual Storage Manager, and Web Environment for Android 10+",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
