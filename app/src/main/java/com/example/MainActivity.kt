@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
                 val conversionState by viewModel.conversionState.collectAsStateWithLifecycle()
                 val installedEmulators by viewModel.installedEmulators.collectAsStateWithLifecycle()
                 val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
+                val coreState by viewModel.coreEngineState.collectAsStateWithLifecycle()
                 val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
 
                 val snackbarHostState = remember { SnackbarHostState() }
@@ -66,6 +67,8 @@ class MainActivity : ComponentActivity() {
                 if (activeSession.isRunning) {
                     ActiveEmulationScreen(
                         session = activeSession,
+                        coreState = coreState,
+                        onToggleDocked = { viewModel.toggleDockedMode() },
                         onStopEmulation = { viewModel.stopEmulationSession() }
                     )
                 } else {

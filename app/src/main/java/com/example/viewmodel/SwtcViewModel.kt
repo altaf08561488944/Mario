@@ -292,6 +292,9 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val switchCoreEngine = com.example.emulator.SwitchCoreEngine()
+    val coreEngineState: StateFlow<com.example.emulator.SwitchCoreState> = switchCoreEngine.engineState
+
     fun launchCartridge(cartridge: VirtualCartridgeEntity) {
         val emulators = installedEmulators.value.filter { it.isInstalled }
         if (emulators.isNotEmpty()) {
@@ -299,7 +302,7 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
             TargetEmulatorManager.launchEmulatorApp(getApplication(), target.packageName)
             showUserMessage("Launching ${cartridge.title} via ${target.appName}...")
         } else {
-            // Launch internal game simulation interface
+            switchCoreEngine.startEmulation(cartridge, isDocked = true)
             _activeSession.value = ActiveEmulationSession(
                 isRunning = true,
                 gameTitle = cartridge.title,
@@ -307,10 +310,28 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
                 sourceFormat = cartridge.sourceFormat,
                 fps = 60
             )
+            showUserMessage("Started SWTC Core Engine for ${cartridge.title}")
         }
     }
 
+    fun launchCartridgeDirectInternal(cartridge: VirtualCartridgeEntity) {
+        switchCoreEngine.startEmulation(cartridge, isDocked = true)
+        _activeSession.value = ActiveEmulationSession(
+            isRunning = true,
+            gameTitle = cartridge.title,
+            titleId = cartridge.titleId,
+            sourceFormat = cartridge.sourceFormat,
+            fps = 60
+        )
+        showUserMessage("Started SWTC Core Engine for ${cartridge.title}")
+    }
+
+    fun toggleDockedMode() {
+        switchCoreEngine.toggleDockedMode()
+    }
+
     fun stopEmulationSession() {
+        switchCoreEngine.stopEmulation()
         _activeSession.value = ActiveEmulationSession(isRunning = false)
     }
 
