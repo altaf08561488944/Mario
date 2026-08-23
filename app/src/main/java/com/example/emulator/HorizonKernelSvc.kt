@@ -65,18 +65,40 @@ object HorizonKernelSvc {
                 HorizonSvcLog(timestamp, 0x18, "svcGetSystemInfo", "type=$infoType -> val=0x${value.toString(16).uppercase()}", "ResultSuccess (0x0)")
             }
 
+            0x1F -> { // svcConnectToNamedPort
+                val portNamePtr = cpu.getX(1)
+                val portName = memory.readString(portNamePtr, 32)
+                val handle = when (portName) {
+                    "sm:" -> 0x100
+                    "nvdrv:a" -> 0x101
+                    "vi:m" -> 0x102
+                    "hid" -> 0x103
+                    "audren" -> 0x104
+                    else -> 0x105
+                }
+                cpu.setX(1, handle.toLong())
+                cpu.setX(0, 0L)
+                HorizonSvcLog(timestamp, 0x1F, "svcConnectToNamedPort", "port=\"$portName\" -> handle=0x${handle.toString(16).uppercase()}", "ResultSuccess (0x0)")
+            }
+
             0x21 -> { // svcSendSyncRequest (IPC Service Call)
                 val handle = cpu.getX(0).toInt()
                 val serviceName = when (handle and 0x0F) {
-                    0 -> "nvdrv:a"
-                    1 -> "vi:m"
-                    2 -> "sm:"
-                    3 -> "hid"
-                    4 -> "audren"
+                    0, 1 -> "nvdrv:a"
+                    2 -> "vi:m"
+                    3 -> "sm:"
+                    4 -> "hid"
+                    5 -> "audren"
                     else -> "nvhost-as-gpu"
                 }
+
+                // Write Horizon IPC Command Response Header (SFCO magic at TLS message buffer)
+                val tlsBuffer = cpu.sp - 0x100
+                memory.write32(tlsBuffer, 0x4F434653) // "SFCO" magic
+                memory.write32(tlsBuffer + 4, 0)      // Result code: Success (0x0)
+
                 cpu.setX(0, 0L)
-                HorizonSvcLog(timestamp, 0x21, "svcSendSyncRequest", "handle=0x${handle.toString(16).uppercase()} ($serviceName)", "IPC ResultSuccess (0x0)")
+                HorizonSvcLog(timestamp, 0x21, "svcSendSyncRequest", "handle=0x${handle.toString(16).uppercase()} ($serviceName) -> SFCO IPC Response Synthesized", "IPC ResultSuccess (0x0)")
             }
 
             0x27 -> { // svcArbitrateLock

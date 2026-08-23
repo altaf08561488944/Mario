@@ -198,23 +198,58 @@ object SwitchRomHeaderParser {
         val headMagic = ByteArray(4)
         raf.readFully(headMagic)
         val magicStr = String(headMagic, Charsets.US_ASCII)
+        val isValid = magicStr == "HEAD"
 
-        val titleIdDerived = "0100" + file.nameWithoutExtension.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+        // Master Key Revision is stored at offset 0x10E in XCI Header
+        raf.seek(0x10E)
+        val rawMasterKey = raf.read() and 0x0F
+        val masterKeyRev = if (rawMasterKey > 0) rawMasterKey else 16
+
+        // Root HFS0 Offset is stored at 0x200 in XCI Header
+        raf.seek(0x200)
+        val rootHfs0Offset = readIntLE(raf).toLong()
+
+        // Attempt to find real Title ID in NCA header or HFS0 secure partition
+        var foundTitleId: String? = null
+        try {
+            if (file.length() > 0x400) {
+                raf.seek(0x200)
+                val buffer = ByteArray(0x400)
+                raf.readFully(buffer)
+                for (i in 0 until buffer.size - 8) {
+                    if (buffer[i] == 'N'.code.toByte() && buffer[i + 1] == 'C'.code.toByte() && buffer[i + 2] == 'A'.code.toByte()) {
+                        val titleBytes = ByteArray(8)
+                        System.arraycopy(buffer, i + 8, titleBytes, 0, 8)
+                        val hex = titleBytes.reversedArray().joinToString("") { "%02X".format(it) }
+                        if (hex.startsWith("0100") && hex.length == 16) {
+                            foundTitleId = hex
+                            break
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore error
+        }
+
+        val titleIdDerived = foundTitleId ?: ("0100" + file.nameWithoutExtension.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase())
 
         return SwitchRomMetadata(
             fileName = file.name,
             filePath = file.absolutePath,
             fileSizeBytes = file.length(),
             format = "XCI (Cartridge ROM Image)",
-            magic = if (magicStr == "HEAD") "HEAD" else "XCI",
-            isValidMagic = true,
+            magic = if (isValid) "HEAD" else "XCI",
+            isValidMagic = isValid,
             titleId = titleIdDerived,
             titleName = file.nameWithoutExtension.replace("_", " "),
-            masterKeyRevision = 16,
+            masterKeyRevision = masterKeyRev,
             sdkVersion = "17.0.0",
             details = mapOf(
                 "Cartridge Size" to "%.2f GB".format(file.length() / (1024.0 * 1024.0 * 1024.0)),
                 "Header Magic" to magicStr,
+                "Root HFS0 Offset" to "0x${rootHfs0Offset.toString(16).uppercase()}",
+                "Master Key Revision" to "$masterKeyRev",
                 "Partition Structure" to "Root / Update / Normal / Secure (HFS0)"
             )
         )

@@ -113,6 +113,78 @@ sealed class DecodedInstruction {
         }
     }
 
+    data class AndReg(val rd: Int, val rn: Int, val rm: Int) : DecodedInstruction() {
+        override val disassembly: String = "AND X$rd, X$rn, X$rm"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.setX(rd, cpu.getX(rn) and cpu.getX(rm))
+            return null
+        }
+    }
+
+    data class EorReg(val rd: Int, val rn: Int, val rm: Int) : DecodedInstruction() {
+        override val disassembly: String = "EOR X$rd, X$rn, X$rm"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.setX(rd, cpu.getX(rn) xor cpu.getX(rm))
+            return null
+        }
+    }
+
+    data class MaddReg(val rd: Int, val rn: Int, val rm: Int, val ra: Int) : DecodedInstruction() {
+        override val disassembly: String = if (ra == 31) "MUL X$rd, X$rn, X$rm" else "MADD X$rd, X$rn, X$rm, X$ra"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val add = if (ra == 31) 0L else cpu.getX(ra)
+            cpu.setX(rd, (cpu.getX(rn) * cpu.getX(rm)) + add)
+            return null
+        }
+    }
+
+    data class UdivReg(val rd: Int, val rn: Int, val rm: Int) : DecodedInstruction() {
+        override val disassembly: String = "UDIV X$rd, X$rn, X$rm"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val divisor = cpu.getX(rm)
+            val result = if (divisor != 0L) java.lang.Long.divideUnsigned(cpu.getX(rn), divisor) else 0L
+            cpu.setX(rd, result)
+            return null
+        }
+    }
+
+    data class SdivReg(val rd: Int, val rn: Int, val rm: Int) : DecodedInstruction() {
+        override val disassembly: String = "SDIV X$rd, X$rn, X$rm"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val divisor = cpu.getX(rm)
+            val result = if (divisor != 0L) cpu.getX(rn) / divisor else 0L
+            cpu.setX(rd, result)
+            return null
+        }
+    }
+
+    data class AdrImm(val rd: Int, val offset: Long, val isAdrp: Boolean) : DecodedInstruction() {
+        override val disassembly: String = "${if (isAdrp) "ADRP" else "ADR"} X$rd, 0x${offset.toString(16).uppercase()}"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val basePc = if (isAdrp) currentPc and -4096L else currentPc
+            cpu.setX(rd, basePc + offset)
+            return null
+        }
+    }
+
+    data class CselReg(val rd: Int, val rn: Int, val rm: Int, val cond: Int) : DecodedInstruction() {
+        override val disassembly: String = "CSEL X$rd, X$rn, X$rm, cond=$cond"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val conditionMet = when (cond) {
+                0 -> cpu.flagZ
+                1 -> !cpu.flagZ
+                2 -> cpu.flagC
+                3 -> !cpu.flagC
+                10 -> cpu.flagN == cpu.flagV
+                11 -> cpu.flagN != cpu.flagV
+                else -> true
+            }
+            val result = if (conditionMet) cpu.getX(rn) else cpu.getX(rm)
+            cpu.setX(rd, result)
+            return null
+        }
+    }
+
     data class StrImm(val rt: Int, val rn: Int, val offset: Long) : DecodedInstruction() {
         override val disassembly: String = "STR X$rt, [${if (rn == 31) "SP" else "X$rn"}, #$offset]"
         override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
@@ -220,8 +292,14 @@ sealed class DecodedInstruction {
     }
 
     data class Unknown(val rawOpcode: Int) : DecodedInstruction() {
-        override val disassembly: String = "RAW_ARM64 [0x${rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()}]"
-        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? = null
+        override val disassembly: String = "UNHANDLED_ARM64 [0x${rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()}]"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            // Unhandled opcodes halt execution or trap if zero/unmapped memory
+            if (rawOpcode == 0) {
+                cpu.isHalted = true
+            }
+            return null
+        }
     }
 }
 
@@ -261,6 +339,17 @@ object ArmDecoder {
 
     private fun decodeDataProcessingImmediate(opcode: Int): DecodedInstruction {
         return when {
+            // ADR / ADRP Xd, label (0x10000000 / 0x90000000)
+            (opcode and 0x1F000000.toInt()) == 0x10000000.toInt() -> {
+                val isAdrp = (opcode ushr 31) and 0x01 == 1
+                val rd = opcode and 0x1F
+                val immlo = (opcode ushr 29) and 0x03
+                val immhi = (opcode ushr 5) and 0x7FFFF
+                val rawImm = (immhi shl 2) or immlo
+                val signedImm = if (rawImm >= 0x100000) rawImm - 0x200000 else rawImm
+                val offset = if (isAdrp) signedImm * 4096L else signedImm.toLong()
+                DecodedInstruction.AdrImm(rd, offset, isAdrp)
+            }
             // MOVZ Xd, #imm, LSL #shift (0xD2800000)
             (opcode and 0xFF800000.toInt()) == 0xD2800000.toInt() -> {
                 val rd = opcode and 0x1F
@@ -402,6 +491,50 @@ object ArmDecoder {
                 val rn = (opcode ushr 5) and 0x1F
                 val rm = (opcode ushr 16) and 0x1F
                 DecodedInstruction.OrrReg(rd, rn, rm)
+            }
+            // AND Xd, Xn, Xm (0x8A000000)
+            (opcode and 0xFF200000.toInt()) == 0x8A000000.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val rm = (opcode ushr 16) and 0x1F
+                DecodedInstruction.AndReg(rd, rn, rm)
+            }
+            // EOR Xd, Xn, Xm (0xCA000000)
+            (opcode and 0xFF200000.toInt()) == 0xCA000000.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val rm = (opcode ushr 16) and 0x1F
+                DecodedInstruction.EorReg(rd, rn, rm)
+            }
+            // MADD / MUL Xd, Xn, Xm, Xra (0x9B000000)
+            (opcode and 0xFF000000.toInt()) == 0x9B000000.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val ra = (opcode ushr 10) and 0x1F
+                val rm = (opcode ushr 16) and 0x1F
+                DecodedInstruction.MaddReg(rd, rn, rm, ra)
+            }
+            // UDIV Xd, Xn, Xm (0x93C00800)
+            (opcode and 0xFFE0FC00.toInt()) == 0x9AC00800.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val rm = (opcode ushr 16) and 0x1F
+                DecodedInstruction.UdivReg(rd, rn, rm)
+            }
+            // SDIV Xd, Xn, Xm (0x9AC00C00)
+            (opcode and 0xFFE0FC00.toInt()) == 0x9AC00C00.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val rm = (opcode ushr 16) and 0x1F
+                DecodedInstruction.SdivReg(rd, rn, rm)
+            }
+            // CSEL Xd, Xn, Xm, cond (0x9A800000)
+            (opcode and 0xFFE00C00.toInt()) == 0x9A800000.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val cond = (opcode ushr 12) and 0x0F
+                val rm = (opcode ushr 16) and 0x1F
+                DecodedInstruction.CselReg(rd, rn, rm, cond)
             }
             else -> DecodedInstruction.Unknown(opcode)
         }

@@ -45,68 +45,79 @@ class TegraGpuEmulator {
         vulkanPipelineBound = if (isDocked) "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK" else "VK_PIPELINE_TEGRA_MAXWELL_3D_HANDHELD"
         drawCallsPerFrame = (instructionsExecuted % 150).toInt() + 210
 
-        // 1. Dark Gradient Background Clear
-        val bgPaint = Paint().apply {
-            color = Color.rgb(10, 15, 30)
-            style = Paint.Style.FILL
-        }
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
-
-        // 2. Animated 3D Wireframe Cube (Representing Real Tegra Maxwell 3D Geometry Pass)
-        animationAngle += 0.03f
-        if (animationAngle > 6.28318f) animationAngle = 0f
-
-        val centerX = width / 2f
-        val centerY = height / 2f - 40f
-        val cubeSize = if (isDocked) 220f else 150f
-
-        val p = Paint().apply {
-            color = Color.rgb(0, 229, 255) // Neon Cyan
-            strokeWidth = if (isDocked) 5f else 3f
-            style = Paint.Style.STROKE
-            isAntiAlias = true
+        // 1. Check if Guest Code has written custom pixel data to VRAM Framebuffer
+        var hasGuestVramData = false
+        val vramSample = memory.read32(GuestMemory.VRAM_BASE)
+        if (vramSample != 0) {
+            val vramPixels = memory.getVramPixels(1280, 720)
+            bitmap.setPixels(vramPixels, 0, 1280, 0, 0, 1280.coerceAtMost(width), 720.coerceAtMost(height))
+            hasGuestVramData = true
+        } else {
+            // Dark Gradient Background Clear for Diagnostic Mode
+            val bgPaint = Paint().apply {
+                color = Color.rgb(10, 15, 30)
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
         }
 
-        // Rotate 3D vertices
-        val cosA = cos(animationAngle.toDouble()).toFloat()
-        val sinA = sin(animationAngle.toDouble()).toFloat()
+        // 2. Maxwell 3D Diagnostic Geometry Pass (rendered if VRAM is uninitialized or overlaid)
+        if (!hasGuestVramData) {
+            animationAngle += 0.03f
+            if (animationAngle > 6.28318f) animationAngle = 0f
 
-        val nodes = arrayOf(
-            floatArrayOf(-1f, -1f, -1f), floatArrayOf(1f, -1f, -1f),
-            floatArrayOf(1f, 1f, -1f), floatArrayOf(-1f, 1f, -1f),
-            floatArrayOf(-1f, -1f, 1f), floatArrayOf(1f, -1f, 1f),
-            floatArrayOf(1f, 1f, 1f), floatArrayOf(-1f, 1f, 1f)
-        )
+            val centerX = width / 2f
+            val centerY = height / 2f - 40f
+            val cubeSize = if (isDocked) 220f else 150f
 
-        val projected = Array(8) { FloatArray(2) }
-        for (i in 0..7) {
-            val x0 = nodes[i][0]
-            val y0 = nodes[i][1]
-            val z0 = nodes[i][2]
+            val p = Paint().apply {
+                color = Color.rgb(0, 229, 255) // Neon Cyan
+                strokeWidth = if (isDocked) 5f else 3f
+                style = Paint.Style.STROKE
+                isAntiAlias = true
+            }
 
-            // Y rotation
-            val x1 = x0 * cosA - z0 * sinA
-            val z1 = x0 * sinA + z0 * cosA
+            // Rotate 3D vertices
+            val cosA = cos(animationAngle.toDouble()).toFloat()
+            val sinA = sin(animationAngle.toDouble()).toFloat()
 
-            // X rotation
-            val y2 = y0 * cosA - z1 * sinA
-            val z2 = y0 * sinA + z1 * cosA
+            val nodes = arrayOf(
+                floatArrayOf(-1f, -1f, -1f), floatArrayOf(1f, -1f, -1f),
+                floatArrayOf(1f, 1f, -1f), floatArrayOf(-1f, 1f, -1f),
+                floatArrayOf(-1f, -1f, 1f), floatArrayOf(1f, -1f, 1f),
+                floatArrayOf(1f, 1f, 1f), floatArrayOf(-1f, 1f, 1f)
+            )
 
-            val perspective = 1f / (z2 + 3f)
-            projected[i][0] = centerX + x1 * cubeSize * perspective * 2f
-            projected[i][1] = centerY + y2 * cubeSize * perspective * 2f
-        }
+            val projected = Array(8) { FloatArray(2) }
+            for (i in 0..7) {
+                val x0 = nodes[i][0]
+                val y0 = nodes[i][1]
+                val z0 = nodes[i][2]
 
-        val edges = arrayOf(
-            intArrayOf(0,1), intArrayOf(1,2), intArrayOf(2,3), intArrayOf(3,0),
-            intArrayOf(4,5), intArrayOf(5,6), intArrayOf(6,7), intArrayOf(7,4),
-            intArrayOf(0,4), intArrayOf(1,5), intArrayOf(2,6), intArrayOf(3,7)
-        )
+                // Y rotation
+                val x1 = x0 * cosA - z0 * sinA
+                val z1 = x0 * sinA + z0 * cosA
 
-        for (edge in edges) {
-            val n1 = edge[0]
-            val n2 = edge[1]
-            canvas.drawLine(projected[n1][0], projected[n1][1], projected[n2][0], projected[n2][1], p)
+                // X rotation
+                val y2 = y0 * cosA - z1 * sinA
+                val z2 = y0 * sinA + z1 * cosA
+
+                val perspective = 1f / (z2 + 3f)
+                projected[i][0] = centerX + x1 * cubeSize * perspective * 2f
+                projected[i][1] = centerY + y2 * cubeSize * perspective * 2f
+            }
+
+            val edges = arrayOf(
+                intArrayOf(0,1), intArrayOf(1,2), intArrayOf(2,3), intArrayOf(3,0),
+                intArrayOf(4,5), intArrayOf(5,6), intArrayOf(6,7), intArrayOf(7,4),
+                intArrayOf(0,4), intArrayOf(1,5), intArrayOf(2,6), intArrayOf(3,7)
+            )
+
+            for (edge in edges) {
+                val n1 = edge[0]
+                val n2 = edge[1]
+                canvas.drawLine(projected[n1][0], projected[n1][1], projected[n2][0], projected[n2][1], p)
+            }
         }
 
         // 3. Game Title & Renderer Metadata Text Overlay
