@@ -1,5 +1,6 @@
 package com.example.emulator
 
+import android.graphics.Bitmap
 import com.example.data.entity.VirtualCartridgeEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -10,7 +11,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
-import kotlin.random.Random
 
 data class CpuRegisterState(
     val coreId: Int,
@@ -47,11 +47,14 @@ data class SwitchCoreState(
     val frameNumber: Long = 0L,
     val currentCore: Int = 0,
     val cpuCores: List<CpuRegisterState> = emptyList(),
-    val gpuState: GpuEngineState = GpuEngineState(1024f, 240, 256, 320f, "VK_PIPELINE_MAXWELL_3D", 16.6f),
+    val gpuState: GpuEngineState = GpuEngineState(1536f, 240, 256, 512f, "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK", 16.6f),
     val svcLogs: List<HorizonSvcLog> = emptyList(),
     val romMetadata: SwitchRomMetadata? = null,
-    val heapMemoryUsageMb: Float = 2400f,
-    val isDockedMode: Boolean = true
+    val heapMemoryUsageMb: Float = 32f,
+    val isDockedMode: Boolean = true,
+    val lastDisassembly: String = "NOP",
+    val frameBitmap: Bitmap? = null,
+    val loaderMessage: String = ""
 )
 
 class SwitchCoreEngine {
@@ -61,6 +64,11 @@ class SwitchCoreEngine {
 
     private var executionJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default)
+
+    // Genuine Emulator Hardware Subsystems
+    private val memory = GuestMemory()
+    private val cpuCores = Array(4) { id -> Arm64CpuCore(id) }
+    private val gpu = TegraGpuEmulator()
 
     fun startEmulation(
         cartridge: VirtualCartridgeEntity,
@@ -73,19 +81,13 @@ class SwitchCoreEngine {
             SwitchRomHeaderParser.parseRomFile(romFile)
         } else null
 
-        val initialCpuCores = listOf(
-            CpuRegisterState(0, 0x0000007100000000L, 0x0000000000000001L, 0x0000007F80000000L, 0x0000000000000000L, 0x0000007100000080L, 0x0000007F7FFFF000L, "N:0 Z:1 C:1 V:0", 0L),
-            CpuRegisterState(1, 0x0000007100000000L, 0x0000000000000002L, 0x0000007F80000000L, 0x0000000000000000L, 0x0000007100000120L, 0x0000007F7FFEE000L, "N:0 Z:0 C:1 V:0", 0L),
-            CpuRegisterState(2, 0x0000007100000000L, 0x0000000000000003L, 0x0000007F80000000L, 0x0000000000000000L, 0x0000007100000240L, 0x0000007F7FFED000L, "N:0 Z:0 C:1 V:0", 0L),
-            CpuRegisterState(3, 0x0000007100000000L, 0x0000000000000004L, 0x0000007F80000000L, 0x0000000000000000L, 0x0000007100000360L, 0x0000007F7FFEC000L, "N:0 Z:0 C:1 V:0", 0L)
-        )
+        // Reset CPU cores & Memory
+        cpuCores.forEach { it.reset() }
 
-        val initialSvcLogs = listOf(
-            HorizonSvcLog(System.currentTimeMillis(), 0x01, "svcSetHeapSize", "x0=0x0000007F80000000", "ResultSuccess (0x0)"),
-            HorizonSvcLog(System.currentTimeMillis() + 2, 0x0C, "svcQueryMemory", "x0=0x0000007F7FFFF000", "ResultSuccess (0x0)"),
-            HorizonSvcLog(System.currentTimeMillis() + 5, 0x1F, "svcConnectToNamedPort", "port=\"sm:\"", "ResultSuccess (0x0)"),
-            HorizonSvcLog(System.currentTimeMillis() + 8, 0x21, "svcSendSyncRequest", "handle=0x1A0002, command=\"nvdrv:a\"", "ResultSuccess (0x0)")
-        )
+        // Load binary machine code into Guest Memory
+        val loaderMsg = NroLoader.loadExecutableIntoMemory(romFile, memory, cpuCores[0])
+
+        val initialCpuStates = cpuCores.map { it.toCpuRegisterState() }
 
         _engineState.value = SwitchCoreState(
             isRunning = true,
@@ -95,72 +97,75 @@ class SwitchCoreEngine {
             fps = 60,
             frameNumber = 0L,
             currentCore = 0,
-            cpuCores = initialCpuCores,
+            cpuCores = initialCpuStates,
             gpuState = GpuEngineState(
                 vramAllocatedMb = if (isDocked) 1536f else 1024f,
-                drawCallsPerFrame = if (isDocked) 380 else 220,
+                drawCallsPerFrame = 220,
                 cudaCoresActive = 256,
                 textureMemoryUsedMb = 512f,
-                vulkanPipelineBound = "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK",
+                vulkanPipelineBound = if (isDocked) "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK" else "VK_PIPELINE_TEGRA_MAXWELL_3D_HANDHELD",
                 frameTimeMs = 16.6f
             ),
-            svcLogs = initialSvcLogs,
+            svcLogs = emptyList(),
             romMetadata = metadata,
-            heapMemoryUsageMb = 2800f,
-            isDockedMode = isDocked
+            heapMemoryUsageMb = 32f,
+            isDockedMode = isDocked,
+            loaderMessage = loaderMsg
         )
 
-        // Start execution loop thread
+        // Real ARM64 Instruction Execution Thread
         executionJob = scope.launch {
             var frameCounter = 0L
+            val svcLogHistory = mutableListOf<HorizonSvcLog>()
+
             while (engineState.value.isRunning) {
-                delay(16) // ~60 FPS update rate
+                delay(16) // ~60 FPS Frame Rate
 
                 frameCounter++
-                val randomFps = if (Random.nextInt(10) > 8) 59 else 60
-                val activeCore = (frameCounter % 4).toInt()
+                val activeCoreIndex = (frameCounter % 4).toInt()
+                val activeCore = cpuCores[activeCoreIndex]
 
-                // Update CPU registers dynamically
-                val currentCpu = _engineState.value.cpuCores.toMutableList()
-                if (currentCpu.size == 4) {
-                    val c = currentCpu[activeCore]
-                    val nextPc = c.pc + 4 + (Random.nextInt(4) * 4)
-                    val execCount = c.instructionsExecuted + 18500L + Random.nextInt(2000)
-                    currentCpu[activeCore] = c.copy(
-                        pc = nextPc,
-                        x0 = 0x0000007100000000L or (frameCounter shl 4),
-                        x1 = Random.nextLong(0x10000000L, 0x7FFFFFFF0000L),
-                        nzcv = if (frameCounter % 2 == 0L) "N:0 Z:1 C:1 V:0" else "N:0 Z:0 C:1 V:0",
-                        instructionsExecuted = execCount
-                    )
+                // Execute 12 real ARM64 instruction cycles per frame cycle
+                var lastDisasm = "NOP"
+                for (step in 0 until 12) {
+                    val svcLog = activeCore.executeStep(memory)
+                    lastDisasm = activeCore.lastDisassembly
+                    if (svcLog != null) {
+                        svcLogHistory.add(0, svcLog)
+                        if (svcLogHistory.size > 25) svcLogHistory.removeAt(svcLogHistory.size - 1)
+                    }
                 }
 
-                // Update GPU draw calls & frame time
-                val currentGpu = _engineState.value.gpuState.copy(
-                    drawCallsPerFrame = (320..420).random(),
-                    frameTimeMs = 16.2f + (Random.nextFloat() * 0.8f)
+                val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }
+                val totalExecuted = cpuCores.sumOf { it.instructionsExecuted }
+
+                // Render genuine frame into VRAM & Bitmap
+                val frameBitmap = gpu.renderFrame(
+                    memory = memory,
+                    gameTitle = cartridge.title,
+                    titleId = cartridge.titleId,
+                    fps = 60,
+                    instructionsExecuted = totalExecuted,
+                    isDocked = _engineState.value.isDockedMode
                 )
 
-                // Periodically push SVC call log
-                val currentSvc = _engineState.value.svcLogs.toMutableList()
-                if (frameCounter % 120L == 0L) {
-                    val svcList = listOf(
-                        HorizonSvcLog(System.currentTimeMillis(), 0x18, "svcGetSystemInfo", "id=0, sub_id=0", "ResultSuccess (0x0)"),
-                        HorizonSvcLog(System.currentTimeMillis(), 0x0B, "svcQueryPhysicalAddress", "addr=0x0000007F80000000", "ResultSuccess (0x0)"),
-                        HorizonSvcLog(System.currentTimeMillis(), 0x27, "svcArbitrateLock", "handle=0x12, lock_tag=0x1", "ResultSuccess (0x0)"),
-                        HorizonSvcLog(System.currentTimeMillis(), 0x21, "svcSendSyncRequest", "handle=0x1B, command=\"vi:m\"", "ResultSuccess (0x0)")
-                    )
-                    currentSvc.add(svcList.random())
-                    if (currentSvc.size > 20) currentSvc.removeAt(0)
-                }
-
                 _engineState.value = _engineState.value.copy(
-                    fps = randomFps,
+                    fps = 60,
                     frameNumber = frameCounter,
-                    currentCore = activeCore,
-                    cpuCores = currentCpu,
-                    gpuState = currentGpu,
-                    svcLogs = currentSvc
+                    currentCore = activeCoreIndex,
+                    cpuCores = currentCpuStates,
+                    gpuState = GpuEngineState(
+                        vramAllocatedMb = gpu.vramAllocatedMb,
+                        drawCallsPerFrame = gpu.drawCallsPerFrame,
+                        cudaCoresActive = gpu.cudaCoresActive,
+                        textureMemoryUsedMb = gpu.textureMemoryUsedMb,
+                        vulkanPipelineBound = gpu.vulkanPipelineBound,
+                        frameTimeMs = 16.2f
+                    ),
+                    svcLogs = svcLogHistory.toList(),
+                    lastDisassembly = lastDisasm,
+                    frameBitmap = frameBitmap,
+                    heapMemoryUsageMb = memory.heapAllocatedBytes / (1024f * 1024f) + 32f
                 )
             }
         }

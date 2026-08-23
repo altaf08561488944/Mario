@@ -1,8 +1,8 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,21 +21,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.DeveloperBoard
-import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Gamepad
-import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -52,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -238,49 +233,41 @@ private fun GameDisplayCanvas(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color(0xFF0F172A), Color(0xFF020617))
-                )
-            ),
+            .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(24.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Gamepad,
-                contentDescription = null,
-                tint = NeonBlue,
-                modifier = Modifier.size(56.dp)
+        if (coreState.frameBitmap != null) {
+            Image(
+                bitmap = coreState.frameBitmap.asImageBitmap(),
+                contentDescription = "Live VRAM Framebuffer",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
             )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = session.gameTitle,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.ExtraBold,
-                color = Color.White,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Format: ${session.sourceFormat} • SDK: ${coreState.romMetadata?.sdkVersion ?: "v17.0.0"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = NeonGreen
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = SurfaceVariantDark,
-                border = CardDefaults.outlinedCardBorder()
+        } else {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(24.dp)
             ) {
+                Icon(
+                    imageVector = Icons.Default.Gamepad,
+                    contentDescription = null,
+                    tint = NeonBlue,
+                    modifier = Modifier.size(56.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = "VULKAN RENDERER: ${coreState.gpuState.vulkanPipelineBound} (${coreState.fps} FPS)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = NeonYellow,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    text = session.gameTitle,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Initializing VRAM Framebuffer @ 0x9000000000...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NeonGreen
                 )
             }
         }
@@ -297,11 +284,32 @@ private fun Arm64CpuViewer(coreState: SwitchCoreState) {
             .padding(16.dp)
     ) {
         Text(
-            text = "ARM64 CORTEX-A57 REGISTERS (AArch64)",
+            text = "ARM64 CORTEX-A57 INTERPRETER (AArch64)",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             color = NeonBlue
         )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Loader Status: ${coreState.loaderMessage}",
+            style = MaterialTheme.typography.labelSmall,
+            color = NeonYellow
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            color = SurfaceVariantDark
+        ) {
+            Text(
+                text = "DISASSEMBLY PIPELINE: ${coreState.lastDisassembly}",
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = NeonGreen,
+                modifier = Modifier.padding(8.dp)
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         coreState.cpuCores.forEach { core ->
@@ -321,7 +329,8 @@ private fun Arm64CpuViewer(coreState: SwitchCoreState) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text("PC: 0x${core.pc.toString(16).uppercase()} | SP: 0x${core.sp.toString(16).uppercase()}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = NeonYellow)
                     Text("X0: 0x${core.x0.toString(16).uppercase()} | X1: 0x${core.x1.toString(16).uppercase()}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.White)
-                    Text("NZCV: ${core.nzcv} | Instructions: ${core.instructionsExecuted}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("X2: 0x${core.x2.toString(16).uppercase()} | X3: 0x${core.x3.toString(16).uppercase()}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.White)
+                    Text("NZCV: ${core.nzcv} | Executed: ${core.instructionsExecuted} instructions", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -350,6 +359,7 @@ private fun TegraGpuViewer(coreState: SwitchCoreState) {
         GpuStatRow("Draw Calls / Frame", "${gpu.drawCallsPerFrame} Maxwell 3D Commands")
         GpuStatRow("Frame Time", "%.2f ms".format(gpu.frameTimeMs))
         GpuStatRow("Vulkan Pipeline", gpu.vulkanPipelineBound)
+        GpuStatRow("Heap Memory", "%.1f MB".format(coreState.heapMemoryUsageMb))
     }
 }
 
@@ -368,41 +378,45 @@ private fun HorizonSvcViewer(coreState: SwitchCoreState) {
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            items(coreState.svcLogs) { log ->
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(6.dp),
-                    color = SurfaceVariantDark
-                ) {
-                    Row(
-                        modifier = Modifier.padding(8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+        if (coreState.svcLogs.isEmpty()) {
+            Text("Waiting for ARM64 SVC instructions...", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(coreState.svcLogs) { log ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(6.dp),
+                        color = SurfaceVariantDark
                     ) {
-                        Column {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = "[0x${log.svcNumber.toString(16).padStart(2, '0').uppercase()}] ${log.svcName}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = log.argumentsHex,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
-                                text = "[0x${log.svcNumber.toString(16).padStart(2, '0').uppercase()}] ${log.svcName}",
+                                text = log.returnCode,
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                            Text(
-                                text = log.argumentsHex,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = NeonGreen,
+                                fontSize = 10.sp
                             )
                         }
-                        Text(
-                            text = log.returnCode,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = NeonGreen,
-                            fontSize = 10.sp
-                        )
                     }
                 }
             }
