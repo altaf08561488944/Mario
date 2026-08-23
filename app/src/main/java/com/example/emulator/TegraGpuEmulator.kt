@@ -4,8 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.RectF
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -33,7 +31,8 @@ class TegraGpuEmulator {
         titleId: String,
         fps: Int,
         instructionsExecuted: Long,
-        isDocked: Boolean
+        isDocked: Boolean,
+        isDevSelfTest: Boolean = false
     ): Bitmap {
         val width = if (isDocked) 1920 else 1280
         val height = if (isDocked) 1080 else 720
@@ -53,95 +52,120 @@ class TegraGpuEmulator {
             bitmap.setPixels(vramPixels, 0, width, 0, 0, width, height)
             hasGuestVramData = true
         } else {
-            // Dark Gradient Background Clear for Diagnostic Mode
+            // Dark Background Clear
             val bgPaint = Paint().apply {
-                color = Color.rgb(10, 15, 30)
+                color = Color.rgb(10, 15, 25)
                 style = Paint.Style.FILL
             }
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
         }
 
-        // 2. Maxwell 3D Diagnostic Geometry Pass (rendered if VRAM is uninitialized or overlaid)
+        // 2. Geometry Pass or "NO GAME FRAME" Status Banner
         if (!hasGuestVramData) {
-            animationAngle += 0.03f
-            if (animationAngle > 6.28318f) animationAngle = 0f
+            if (isDevSelfTest) {
+                // Developer Mode CPU/GPU Diagnostic 3D Geometry Pass
+                animationAngle += 0.03f
+                if (animationAngle > 6.28318f) animationAngle = 0f
 
-            val centerX = width / 2f
-            val centerY = height / 2f - 40f
-            val cubeSize = if (isDocked) 220f else 150f
+                val centerX = width / 2f
+                val centerY = height / 2f - 40f
+                val cubeSize = if (isDocked) 220f else 150f
 
-            val p = Paint().apply {
-                color = Color.rgb(0, 229, 255) // Neon Cyan
-                strokeWidth = if (isDocked) 5f else 3f
-                style = Paint.Style.STROKE
-                isAntiAlias = true
-            }
+                val p = Paint().apply {
+                    color = Color.rgb(0, 229, 255) // Neon Cyan
+                    strokeWidth = if (isDocked) 5f else 3f
+                    style = Paint.Style.STROKE
+                    isAntiAlias = true
+                }
 
-            // Rotate 3D vertices
-            val cosA = cos(animationAngle.toDouble()).toFloat()
-            val sinA = sin(animationAngle.toDouble()).toFloat()
+                val cosA = cos(animationAngle.toDouble()).toFloat()
+                val sinA = sin(animationAngle.toDouble()).toFloat()
 
-            val nodes = arrayOf(
-                floatArrayOf(-1f, -1f, -1f), floatArrayOf(1f, -1f, -1f),
-                floatArrayOf(1f, 1f, -1f), floatArrayOf(-1f, 1f, -1f),
-                floatArrayOf(-1f, -1f, 1f), floatArrayOf(1f, -1f, 1f),
-                floatArrayOf(1f, 1f, 1f), floatArrayOf(-1f, 1f, 1f)
-            )
+                val nodes = arrayOf(
+                    floatArrayOf(-1f, -1f, -1f), floatArrayOf(1f, -1f, -1f),
+                    floatArrayOf(1f, 1f, -1f), floatArrayOf(-1f, 1f, -1f),
+                    floatArrayOf(-1f, -1f, 1f), floatArrayOf(1f, -1f, 1f),
+                    floatArrayOf(1f, 1f, 1f), floatArrayOf(-1f, 1f, 1f)
+                )
 
-            val projected = Array(8) { FloatArray(2) }
-            for (i in 0..7) {
-                val x0 = nodes[i][0]
-                val y0 = nodes[i][1]
-                val z0 = nodes[i][2]
+                val projected = Array(8) { FloatArray(2) }
+                for (i in 0..7) {
+                    val x0 = nodes[i][0]
+                    val y0 = nodes[i][1]
+                    val z0 = nodes[i][2]
 
-                // Y rotation
-                val x1 = x0 * cosA - z0 * sinA
-                val z1 = x0 * sinA + z0 * cosA
+                    val x1 = x0 * cosA - z0 * sinA
+                    val z1 = x0 * sinA + z0 * cosA
 
-                // X rotation
-                val y2 = y0 * cosA - z1 * sinA
-                val z2 = y0 * sinA + z1 * cosA
+                    val y2 = y0 * cosA - z1 * sinA
+                    val z2 = y0 * sinA + z1 * cosA
 
-                val perspective = 1f / (z2 + 3f)
-                projected[i][0] = centerX + x1 * cubeSize * perspective * 2f
-                projected[i][1] = centerY + y2 * cubeSize * perspective * 2f
-            }
+                    val perspective = 1f / (z2 + 3f)
+                    projected[i][0] = centerX + x1 * cubeSize * perspective * 2f
+                    projected[i][1] = centerY + y2 * cubeSize * perspective * 2f
+                }
 
-            val edges = arrayOf(
-                intArrayOf(0,1), intArrayOf(1,2), intArrayOf(2,3), intArrayOf(3,0),
-                intArrayOf(4,5), intArrayOf(5,6), intArrayOf(6,7), intArrayOf(7,4),
-                intArrayOf(0,4), intArrayOf(1,5), intArrayOf(2,6), intArrayOf(3,7)
-            )
+                val edges = arrayOf(
+                    intArrayOf(0,1), intArrayOf(1,2), intArrayOf(2,3), intArrayOf(3,0),
+                    intArrayOf(4,5), intArrayOf(5,6), intArrayOf(6,7), intArrayOf(7,4),
+                    intArrayOf(0,4), intArrayOf(1,5), intArrayOf(2,6), intArrayOf(3,7)
+                )
 
-            for (edge in edges) {
-                val n1 = edge[0]
-                val n2 = edge[1]
-                canvas.drawLine(projected[n1][0], projected[n1][1], projected[n2][0], projected[n2][1], p)
+                for (edge in edges) {
+                    val n1 = edge[0]
+                    val n2 = edge[1]
+                    canvas.drawLine(projected[n1][0], projected[n1][1], projected[n2][0], projected[n2][1], p)
+                }
+
+                val devTagPaint = Paint().apply {
+                    color = Color.rgb(255, 171, 0)
+                    textSize = if (isDocked) 28f else 20f
+                    isAntiAlias = true
+                    isFakeBoldText = true
+                }
+                canvas.drawText("🧪 [DEVELOPER CPU/GPU SELF-TEST DIAGNOSTIC]", centerX - 260f, centerY - cubeSize - 30f, devTagPaint)
+            } else {
+                // REAL GAME EXECUTION MODE - Honest "NO GAME FRAME" Overlay
+                val headerPaint = Paint().apply {
+                    color = Color.rgb(255, 82, 82) // Bright Red Accent
+                    textSize = if (isDocked) 40f else 28f
+                    isAntiAlias = true
+                    isFakeBoldText = true
+                }
+                canvas.drawText("NO GAME FRAME SUBMITTED", 80f, height / 2f - 40f, headerPaint)
+
+                val infoPaint = Paint().apply {
+                    color = Color.rgb(200, 200, 200)
+                    textSize = if (isDocked) 24f else 18f
+                    isAntiAlias = true
+                }
+                canvas.drawText("Guest ARM64 executable running. Waiting for display framebuffer at 0x9000000000...", 80f, height / 2f + 10f, infoPaint)
+                canvas.drawText("NVN Maxwell 3D Pipeline active • $instructionsExecuted ARM64 Instructions Executed", 80f, height / 2f + 50f, infoPaint)
             }
         }
 
         // 3. Game Title & Renderer Metadata Text Overlay
         val textPaint = Paint().apply {
             color = Color.WHITE
-            textSize = if (isDocked) 48f else 32f
+            textSize = if (isDocked) 44f else 30f
             isAntiAlias = true
             isFakeBoldText = true
         }
-        canvas.drawText(gameTitle, 60f, height - 160f, textPaint)
+        canvas.drawText(gameTitle, 60f, height - 150f, textPaint)
 
         val subTextPaint = Paint().apply {
             color = Color.rgb(0, 230, 118) // Neon Green
-            textSize = if (isDocked) 28f else 20f
+            textSize = if (isDocked) 26f else 18f
             isAntiAlias = true
         }
-        canvas.drawText("Title ID: $titleId • Resolution: ${width}x${height} ($fps FPS)", 60f, height - 110f, subTextPaint)
+        canvas.drawText("Title ID: $titleId • Resolution: ${width}x${height} ($fps FPS)", 60f, height - 105f, subTextPaint)
 
         val vramPaint = Paint().apply {
             color = Color.rgb(255, 215, 0) // Gold
-            textSize = if (isDocked) 24f else 18f
+            textSize = if (isDocked) 22f else 16f
             isAntiAlias = true
         }
-        canvas.drawText("NVN TEGRA MAXWELL 3D • Instructions Executed: $instructionsExecuted", 60f, height - 60f, vramPaint)
+        canvas.drawText("TEGRA X1 MAXWELL 3D • Instructions Executed: $instructionsExecuted", 60f, height - 60f, vramPaint)
 
         // 4. Flush ARGB Pixels into Guest VRAM Framebuffer memory at 0x9000000000
         val sampleSize = (width * height).coerceAtMost(1000)

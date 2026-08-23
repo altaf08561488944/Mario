@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Tv
@@ -54,6 +56,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.emulator.GameLifecycleState
 import com.example.emulator.SwitchCoreState
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.NeonBlue
@@ -70,7 +73,8 @@ fun ActiveEmulationScreen(
     session: ActiveEmulationSession,
     coreState: SwitchCoreState,
     onToggleDocked: () -> Unit,
-    onStopEmulation: () -> Unit
+    onStopEmulation: () -> Unit,
+    onRunDevSelfTest: (() -> Unit)? = null
 ) {
     var selectedHudTab by remember { mutableIntStateOf(0) } // 0: CANVAS, 1: CPU ARM64, 2: TEGRA GPU, 3: HORIZON SVC
 
@@ -100,11 +104,17 @@ fun ActiveEmulationScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        val statusColor = when (coreState.lifecycleState) {
+                            GameLifecycleState.FAILED -> NeonRed
+                            GameLifecycleState.PLAYABLE, GameLifecycleState.FIRST_FRAME -> NeonGreen
+                            GameLifecycleState.EXECUTING -> NeonBlue
+                            else -> NeonYellow
+                        }
                         Box(
                             modifier = Modifier
                                 .size(10.dp)
                                 .clip(CircleShape)
-                                .background(NeonGreen)
+                                .background(statusColor)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
@@ -117,9 +127,9 @@ fun ActiveEmulationScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "Title ID: ${session.titleId} • ${coreState.fps} FPS",
+                                text = "State: ${coreState.lifecycleState.displayName} • ${coreState.fps} FPS",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = NeonGreen
+                                color = statusColor
                             )
                         }
                     }
@@ -190,7 +200,7 @@ fun ActiveEmulationScreen(
                     .border(1.dp, SurfaceBorder, RoundedCornerShape(16.dp))
             ) {
                 when (selectedHudTab) {
-                    0 -> GameDisplayCanvas(session, coreState)
+                    0 -> GameDisplayCanvas(session, coreState, onRunDevSelfTest)
                     1 -> Arm64CpuViewer(coreState)
                     2 -> TegraGpuViewer(coreState)
                     3 -> HorizonSvcViewer(coreState)
@@ -228,7 +238,8 @@ fun ActiveEmulationScreen(
 @Composable
 private fun GameDisplayCanvas(
     session: ActiveEmulationSession,
-    coreState: SwitchCoreState
+    coreState: SwitchCoreState,
+    onRunDevSelfTest: (() -> Unit)? = null
 ) {
     Box(
         modifier = Modifier
@@ -236,7 +247,65 @@ private fun GameDisplayCanvas(
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        if (coreState.frameBitmap != null) {
+        if (coreState.lifecycleState == GameLifecycleState.FAILED || coreState.errorMessage != null) {
+            // Failure Screen Display
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Error,
+                    contentDescription = null,
+                    tint = NeonRed,
+                    modifier = Modifier.size(64.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "GAME LOAD FAILED",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = NeonRed,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = Brush.horizontalGradient(listOf(NeonRed, NeonYellow)))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Diagnostic Reason: ${coreState.errorMessage ?: "Unknown Loader Failure"}",
+                            fontWeight = FontWeight.Bold,
+                            color = NeonYellow,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = coreState.errorDetail ?: "Unable to locate or decrypt guest NSO/NRO executable binary.",
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                if (onRunDevSelfTest != null) {
+                    OutlinedButton(
+                        onClick = onRunDevSelfTest,
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.BugReport, contentDescription = null, tint = NeonYellow, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Run Developer ARM64 CPU Self-Test Mode", color = Color.White, fontSize = 12.sp)
+                    }
+                }
+            }
+        } else if (coreState.frameBitmap != null) {
             Image(
                 bitmap = coreState.frameBitmap.asImageBitmap(),
                 contentDescription = "Live VRAM Framebuffer",
@@ -265,9 +334,10 @@ private fun GameDisplayCanvas(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Initializing VRAM Framebuffer @ 0x9000000000...",
+                    text = coreState.loaderMessage.ifEmpty { "Pipeline Step: ${coreState.lifecycleState.displayName}..." },
                     style = MaterialTheme.typography.bodySmall,
-                    color = NeonGreen
+                    color = NeonGreen,
+                    textAlign = TextAlign.Center
                 )
             }
         }
@@ -291,10 +361,35 @@ private fun Arm64CpuViewer(coreState: SwitchCoreState) {
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "Loader Status: ${coreState.loaderMessage}",
+            text = "Pipeline: ${coreState.lifecycleState.displayName}",
             style = MaterialTheme.typography.labelSmall,
-            color = NeonYellow
+            color = if (coreState.lifecycleState == GameLifecycleState.FAILED) NeonRed else NeonYellow
         )
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Guest Process Information
+        coreState.guestProcess?.let { process ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceVariantDark)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "GUEST PROCESS: ${process.processName} [Title ID: ${process.titleId}]",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = NeonGreen
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("Entry Point: 0x${process.entryPoint.toString(16).uppercase()} | SP: 0x${process.stackPointer.toString(16).uppercase()}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.White)
+                    Text("Mapped Segments: ${process.mappedSegments.joinToString(", ")}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Loaded Modules: ${process.modules.joinToString(", ")}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(4.dp))
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -306,7 +401,7 @@ private fun Arm64CpuViewer(coreState: SwitchCoreState) {
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = NeonGreen,
+                color = if (coreState.lastDisassembly.contains("UNSUPPORTED_INSTRUCTION")) NeonRed else NeonGreen,
                 modifier = Modifier.padding(8.dp)
             )
         }
@@ -401,7 +496,7 @@ private fun HorizonSvcViewer(coreState: SwitchCoreState) {
                                     text = "[0x${log.svcNumber.toString(16).padStart(2, '0').uppercase()}] ${log.svcName}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.White
+                                    color = if (log.svcName == "UNSUPPORTED_INSTRUCTION") NeonRed else Color.White
                                 )
                                 Text(
                                     text = log.argumentsHex,
@@ -413,7 +508,7 @@ private fun HorizonSvcViewer(coreState: SwitchCoreState) {
                             Text(
                                 text = log.returnCode,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = NeonGreen,
+                                color = if (log.svcName == "UNSUPPORTED_INSTRUCTION") NeonRed else NeonGreen,
                                 fontSize = 10.sp
                             )
                         }

@@ -69,7 +69,8 @@ class MainActivity : ComponentActivity() {
                         session = activeSession,
                         coreState = coreState,
                         onToggleDocked = { viewModel.toggleDockedMode() },
-                        onStopEmulation = { viewModel.stopEmulationSession() }
+                        onStopEmulation = { viewModel.stopEmulationSession() },
+                        onRunDevSelfTest = { viewModel.runDevCpuSelfTest() }
                     )
                 } else {
                     Scaffold(

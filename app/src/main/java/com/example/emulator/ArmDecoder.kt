@@ -359,12 +359,50 @@ sealed class DecodedInstruction {
     }
 
     data class Unknown(val rawOpcode: Int) : DecodedInstruction() {
-        override val disassembly: String = "UNHANDLED_ARM64 [0x${rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()}]"
+        override val disassembly: String = "UNSUPPORTED_INSTRUCTION [0x${rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()}]"
         override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
-            // Unhandled opcodes halt execution or trap if zero/unmapped memory
-            if (rawOpcode == 0) {
-                cpu.isHalted = true
-            }
+            cpu.isHalted = true
+            val hexPc = "0x" + currentPc.toString(16).uppercase()
+            val hexOp = "0x" + rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()
+            cpu.lastDisassembly = "UNSUPPORTED_INSTRUCTION PC: $hexPc OPCODE: $hexOp"
+            return HorizonSvcLog(
+                timestampMs = System.currentTimeMillis(),
+                svcNumber = -1,
+                svcName = "UNSUPPORTED_INSTRUCTION",
+                argumentsHex = "PC=$hexPc OPCODE=$hexOp",
+                returnCode = "CPU_HALTED_UNHANDLED_OPCODE"
+            )
+        }
+    }
+
+    data class Ubfm(val rd: Int, val rn: Int, val immr: Int, val imms: Int) : DecodedInstruction() {
+        override val disassembly: String = "UBFX X$rd, X$rn, #$immr, #${(imms - immr + 1).coerceAtLeast(1)}"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val valN = cpu.getX(rn)
+            val shifted = valN ushr immr
+            val width = (imms - immr + 1).coerceIn(1, 64)
+            val mask = if (width == 64) -1L else (1L shl width) - 1L
+            cpu.setX(rd, shifted and mask)
+            return null
+        }
+    }
+
+    data class Dmb(val option: Int) : DecodedInstruction() {
+        override val disassembly: String = "DMB ISH"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? = null
+    }
+
+    data class Isb(val option: Int) : DecodedInstruction() {
+        override val disassembly: String = "ISB"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? = null
+    }
+
+    data class Fadd(val rd: Int, val rn: Int, val rm: Int) : DecodedInstruction() {
+        override val disassembly: String = "FADD D$rd, D$rn, D$rm"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val valN = java.lang.Double.longBitsToDouble(cpu.getX(rn))
+            val valM = java.lang.Double.longBitsToDouble(cpu.getX(rm))
+            cpu.setX(rd, java.lang.Double.doubleToRawLongBits(valN + valM))
             return null
         }
     }
@@ -492,6 +530,16 @@ object ArmDecoder {
                 val imm19 = (opcode ushr 5) and 0x7FFFF
                 val offset = (if (imm19 >= 0x40000) imm19 - 0x80000 else imm19) * 4L
                 DecodedInstruction.BranchCond(cond, currentPc + offset)
+            }
+            // DMB / DSB (0xD50330BF)
+            (opcode and 0xFFFFF0FF.toInt()) == 0xD50330BF.toInt() -> {
+                val opt = (opcode ushr 8) and 0x0F
+                DecodedInstruction.Dmb(opt)
+            }
+            // ISB (0xD5033FDF)
+            (opcode and 0xFFFFF0FF.toInt()) == 0xD5033FDF.toInt() -> {
+                val opt = (opcode ushr 8) and 0x0F
+                DecodedInstruction.Isb(opt)
             }
             else -> DecodedInstruction.Unknown(opcode)
         }

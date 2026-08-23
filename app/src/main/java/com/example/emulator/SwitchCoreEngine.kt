@@ -40,10 +40,11 @@ data class HorizonSvcLog(
 
 data class SwitchCoreState(
     val isRunning: Boolean = false,
+    val lifecycleState: GameLifecycleState = GameLifecycleState.FILE_SELECTED,
     val gameTitle: String = "",
     val titleId: String = "",
     val sourceFormat: String = "",
-    val fps: Int = 60,
+    val fps: Int = 0,
     val frameNumber: Long = 0L,
     val currentCore: Int = 0,
     val cpuCores: List<CpuRegisterState> = emptyList(),
@@ -54,7 +55,12 @@ data class SwitchCoreState(
     val isDockedMode: Boolean = true,
     val lastDisassembly: String = "NOP",
     val frameBitmap: Bitmap? = null,
-    val loaderMessage: String = ""
+    val loaderMessage: String = "",
+    val guestProcess: GuestProcess? = null,
+    val hasProducedFrame: Boolean = false,
+    val errorMessage: String? = null,
+    val errorDetail: String? = null,
+    val isDevSelfTest: Boolean = false
 )
 
 class SwitchCoreEngine {
@@ -76,47 +82,125 @@ class SwitchCoreEngine {
     ) {
         stopEmulation()
 
+        _engineState.value = SwitchCoreState(
+            isRunning = false,
+            lifecycleState = GameLifecycleState.VALIDATING,
+            gameTitle = cartridge.title,
+            titleId = cartridge.titleId,
+            sourceFormat = cartridge.sourceFormat,
+            isDockedMode = isDocked,
+            loaderMessage = "Step 1/11: Validating File Structure & Signatures..."
+        )
+
         val romFile = File(cartridge.originalFilePath)
         val metadata = if (romFile.exists()) {
             SwitchRomHeaderParser.parseRomFile(romFile)
         } else null
 
-        // Reset CPU cores & Memory (Core 0 = Primary Guest Thread, Cores 1-3 = Halted until created)
+        _engineState.value = _engineState.value.copy(
+            lifecycleState = GameLifecycleState.PARSING_CONTAINER,
+            romMetadata = metadata,
+            loaderMessage = "Step 2/11: Parsing Cartridge Container (${cartridge.sourceFormat})..."
+        )
+
+        // Reset CPU cores & Memory
         cpuCores.forEachIndexed { id, core ->
             core.reset()
             if (id > 0) core.isHalted = true
         }
 
-        // Load binary machine code into Guest Memory
-        val loaderMsg = NroLoader.loadExecutableIntoMemory(romFile, memory, cpuCores[0])
+        // Initialize Horizon Mock Kernel & System Service Dispatch Table
+        FirmwareParser.MockHorizonKernel.initializeKernelEnvironment()
 
-        val initialCpuStates = cpuCores.map { it.toCpuRegisterState() }
+        _engineState.value = _engineState.value.copy(
+            lifecycleState = GameLifecycleState.LOCATING_CONTENT,
+            loaderMessage = "Step 3/11: Locating Program Content & NCA Entries..."
+        )
+
+        _engineState.value = _engineState.value.copy(
+            lifecycleState = GameLifecycleState.LOADING_EXECUTABLE,
+            loaderMessage = "Step 4/11: Decrypting & Mapping Executable (NSO/NRO)..."
+        )
+
+        // Load binary machine code into Guest Memory
+        val loadResult = NroLoader.loadExecutableIntoMemory(romFile, memory, cpuCores[0])
+
+        when (loadResult) {
+            is NroLoader.LoadResult.Failure -> {
+                // HALT PIPELINE - REPORT HONEST FAILURE TO USER
+                _engineState.value = SwitchCoreState(
+                    isRunning = false,
+                    lifecycleState = GameLifecycleState.FAILED,
+                    gameTitle = cartridge.title,
+                    titleId = cartridge.titleId,
+                    sourceFormat = cartridge.sourceFormat,
+                    romMetadata = metadata,
+                    loaderMessage = "❌ GAME LOAD FAILED: ${loadResult.reason}",
+                    errorMessage = loadResult.reason,
+                    errorDetail = "${loadResult.errorDetail}\nSuggested Action: ${loadResult.suggestedAction}"
+                )
+                return
+            }
+
+            is NroLoader.LoadResult.Success -> {
+                _engineState.value = _engineState.value.copy(
+                    lifecycleState = GameLifecycleState.CREATING_PROCESS,
+                    loaderMessage = "Step 5/11: Creating Guest Process '${loadResult.guestProcess.processName}'..."
+                )
+
+                _engineState.value = _engineState.value.copy(
+                    lifecycleState = GameLifecycleState.INITIALIZING_RUNTIME,
+                    loaderMessage = "Step 6/11: Initializing Horizon Kernel & Memory Mapping..."
+                )
+
+                _engineState.value = _engineState.value.copy(
+                    isRunning = true,
+                    lifecycleState = GameLifecycleState.EXECUTING,
+                    guestProcess = loadResult.guestProcess,
+                    cpuCores = cpuCores.map { it.toCpuRegisterState() },
+                    loaderMessage = loadResult.message,
+                    isDevSelfTest = false
+                )
+
+                // Launch ARM64 Execution Loop
+                startExecutionLoop(cartridge.title, cartridge.titleId)
+            }
+        }
+    }
+
+    /**
+     * Explicit Developer Mode CPU/ARM64 Diagnostic Test launcher.
+     */
+    fun runDevCpuSelfTest(isDocked: Boolean = true) {
+        stopEmulation()
+
+        cpuCores.forEachIndexed { id, core ->
+            core.reset()
+            if (id > 0) core.isHalted = true
+        }
+
+        FirmwareParser.MockHorizonKernel.initializeKernelEnvironment()
+
+        val devResult = NroLoader.loadDevCpuSelfTestPayload(memory, cpuCores[0], "DEV_CPU_CORE_TEST")
 
         _engineState.value = SwitchCoreState(
             isRunning = true,
-            gameTitle = cartridge.title,
-            titleId = cartridge.titleId,
-            sourceFormat = cartridge.sourceFormat,
-            fps = 60,
-            frameNumber = 0L,
-            currentCore = 0,
-            cpuCores = initialCpuStates,
-            gpuState = GpuEngineState(
-                vramAllocatedMb = if (isDocked) 1536f else 1024f,
-                drawCallsPerFrame = 220,
-                cudaCoresActive = 256,
-                textureMemoryUsedMb = 512f,
-                vulkanPipelineBound = if (isDocked) "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK" else "VK_PIPELINE_TEGRA_MAXWELL_3D_HANDHELD",
-                frameTimeMs = 16.6f
-            ),
-            svcLogs = emptyList(),
-            romMetadata = metadata,
-            heapMemoryUsageMb = 32f,
+            lifecycleState = GameLifecycleState.PLAYABLE,
+            gameTitle = "[DEV MODE] ARM64 CPU Self-Test",
+            titleId = "0100000000000000",
+            sourceFormat = "DEV_TEST",
             isDockedMode = isDocked,
-            loaderMessage = loaderMsg
+            guestProcess = devResult.guestProcess,
+            cpuCores = cpuCores.map { it.toCpuRegisterState() },
+            loaderMessage = devResult.message,
+            isDevSelfTest = true,
+            hasProducedFrame = true
         )
 
-        // Real ARM64 Instruction Execution Thread
+        startExecutionLoop("[DEV MODE] ARM64 CPU Self-Test", "0100000000000000")
+    }
+
+    private fun startExecutionLoop(titleName: String, titleId: String) {
         executionJob = scope.launch {
             var frameCounter = 0L
             val svcLogHistory = mutableListOf<HorizonSvcLog>()
@@ -133,6 +217,7 @@ class SwitchCoreEngine {
                     for (core in activeCores) {
                         activeCoreIndex = core.coreId
                         for (step in 0 until 12) {
+                            if (core.isHalted) break
                             val svcLog = core.executeStep(memory)
                             lastDisasm = core.lastDisassembly
                             if (svcLog != null) {
@@ -141,23 +226,49 @@ class SwitchCoreEngine {
                             }
                         }
                     }
+                } else {
+                    // Check if CPU halted on error or unsupported instruction
+                    if (_engineState.value.lifecycleState != GameLifecycleState.FAILED && !_engineState.value.isDevSelfTest) {
+                        val activeDisasm = cpuCores[0].lastDisassembly
+                        if (activeDisasm.contains("UNSUPPORTED_INSTRUCTION")) {
+                            _engineState.value = _engineState.value.copy(
+                                isRunning = false,
+                                lifecycleState = GameLifecycleState.FAILED,
+                                errorMessage = "CPU_HALTED_UNSUPPORTED_INSTRUCTION",
+                                errorDetail = "CPU halted on unsupported ARM64 opcode: $activeDisasm"
+                            )
+                            break
+                        }
+                    }
                 }
 
                 val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }
                 val totalExecuted = cpuCores.sumOf { it.instructionsExecuted }
 
-                // Render genuine frame into VRAM & Bitmap
+                // Check if Guest VRAM contains non-zero pixels
+                val hasGuestFrame = memory.read32(GuestMemory.VRAM_BASE) != 0
+                val currentLifecycle = when {
+                    _engineState.value.isDevSelfTest -> GameLifecycleState.PLAYABLE
+                    hasGuestFrame && _engineState.value.lifecycleState == GameLifecycleState.EXECUTING -> GameLifecycleState.FIRST_FRAME
+                    hasGuestFrame && _engineState.value.lifecycleState == GameLifecycleState.FIRST_FRAME -> GameLifecycleState.PLAYABLE
+                    else -> _engineState.value.lifecycleState
+                }
+
+                // Render frame into VRAM & Bitmap
                 val frameBitmap = gpu.renderFrame(
                     memory = memory,
-                    gameTitle = cartridge.title,
-                    titleId = cartridge.titleId,
+                    gameTitle = titleName,
+                    titleId = titleId,
                     fps = 60,
                     instructionsExecuted = totalExecuted,
-                    isDocked = _engineState.value.isDockedMode
+                    isDocked = _engineState.value.isDockedMode,
+                    isDevSelfTest = _engineState.value.isDevSelfTest
                 )
 
                 _engineState.value = _engineState.value.copy(
                     fps = 60,
+                    lifecycleState = currentLifecycle,
+                    hasProducedFrame = hasGuestFrame || _engineState.value.isDevSelfTest,
                     frameNumber = frameCounter,
                     currentCore = activeCoreIndex,
                     cpuCores = currentCpuStates,
@@ -181,7 +292,7 @@ class SwitchCoreEngine {
     fun stopEmulation() {
         executionJob?.cancel()
         executionJob = null
-        _engineState.value = SwitchCoreState(isRunning = false)
+        _engineState.value = SwitchCoreState(isRunning = false, lifecycleState = GameLifecycleState.FILE_SELECTED)
     }
 
     fun toggleDockedMode() {

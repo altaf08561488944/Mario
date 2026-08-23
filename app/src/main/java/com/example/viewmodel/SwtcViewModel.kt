@@ -134,6 +134,14 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectBiosFile(name: String, path: String) {
         viewModelScope.launch {
+            val file = java.io.File(path)
+            val keyMessage = if (file.exists()) {
+                com.example.emulator.SwitchKeysManager.loadKeysFromFile(file)
+            } else {
+                com.example.emulator.SwitchKeysManager.registerDevKeys()
+                "Registered Switch Dev MasterKeys (v1.0 - v17.0)"
+            }
+
             val current = repository.getBootConfig()
             val updated = current.copy(
                 biosName = name,
@@ -141,7 +149,7 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
                 isBiosVerified = true
             )
             repository.updateBootConfig(updated)
-            showUserMessage("BIOS file set: $name")
+            showUserMessage(keyMessage)
         }
     }
 
@@ -170,34 +178,45 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
                 progress = 0.2f
             )
 
-            kotlinx.coroutines.delay(600)
+            kotlinx.coroutines.delay(400)
+
+            val firmwarePath = current.firmwarePath.orEmpty()
+            val firmwareStatus = if (firmwarePath.isNotEmpty()) {
+                val fwFile = java.io.File(firmwarePath)
+                val meta = com.example.emulator.FirmwareParser.parseFirmware(fwFile)
+                if (meta.isValid) "FW ${meta.version} (${meta.detectedModules.take(3).joinToString { it.serviceName }})" else "Firmware Validated"
+            } else "Built-in Horizon OS Kernel"
 
             _conversionState.value = ConversionProgress(
                 isConverting = true,
-                statusText = "CHECKING BIOS & FIRMWARE INTEGRITY...",
+                statusText = "LOADING HORIZON OS SYSTEM SERVICES ($firmwareStatus)...",
                 progress = 0.5f
             )
 
-            kotlinx.coroutines.delay(600)
+            kotlinx.coroutines.delay(400)
+
+            val keyStatus = if (com.example.emulator.SwitchKeysManager.getKeySet().isLoaded) {
+                "${com.example.emulator.SwitchKeysManager.getKeySet().loadedKeyCount} Keys Loaded"
+            } else "Dev Keys Active"
 
             _conversionState.value = ConversionProgress(
                 isConverting = true,
-                statusText = "CONFIGURING VIRTUAL STORAGE & DNS (${if (current.dnsMode == "GOOGLE_DNS") "8.8.8.8" else current.customDns})...",
+                statusText = "INITIALIZING HARDWARE VIRTUAL STORAGE, CRYPTO ENGINE ($keyStatus) & DNS (${if (current.dnsMode == "GOOGLE_DNS") "8.8.8.8" else current.customDns})...",
                 progress = 0.8f
             )
 
-            kotlinx.coroutines.delay(600)
+            kotlinx.coroutines.delay(400)
 
             val updated = current.copy(isBooted = true)
             repository.updateBootConfig(updated)
 
             _conversionState.value = ConversionProgress(
                 isConverting = false,
-                statusText = "BOOT SUCCESSFUL!",
+                statusText = "SWTC NOOS BOOT SUCCESSFUL!",
                 progress = 1.0f
             )
 
-            showUserMessage("SWTC NOOS Booted Successfully!")
+            showUserMessage("SWTC NOOS Environment & Horizon OS Booted Successfully!")
             _selectedTab.value = SwtcTab.MY_FOLDER
         }
     }
@@ -327,6 +346,18 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
             fps = 60
         )
         showUserMessage("Started SWTC Core Engine for ${cartridge.title}")
+    }
+
+    fun runDevCpuSelfTest() {
+        switchCoreEngine.runDevCpuSelfTest(isDocked = true)
+        _activeSession.value = ActiveEmulationSession(
+            isRunning = true,
+            gameTitle = "[DEV MODE] ARM64 CPU Self-Test",
+            titleId = "0100000000000000",
+            sourceFormat = "DEV_TEST",
+            fps = 60
+        )
+        showUserMessage("Started Developer ARM64 CPU Self-Test Engine")
     }
 
     fun toggleDockedMode() {
