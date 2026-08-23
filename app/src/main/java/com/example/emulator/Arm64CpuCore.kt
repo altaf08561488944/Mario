@@ -9,9 +9,10 @@ class Arm64CpuCore(val coreId: Int) {
     // 64-bit General Purpose Registers X0 - X30
     private val x = LongArray(31)
 
-    // Program Counter & Stack Pointer
+    // Program Counter, Stack Pointer, and TLS Base
     var pc: Long = GuestMemory.CODE_BASE
     var sp: Long = GuestMemory.STACK_TOP
+    var tlsBase: Long = GuestMemory.TLS_BASE
 
     // NZCV Condition Flags
     var flagN: Boolean = false
@@ -25,10 +26,11 @@ class Arm64CpuCore(val coreId: Int) {
     var lastDisassembly: String = "NOP"
     var lastSvcLog: HorizonSvcLog? = null
 
-    fun reset(startPc: Long = GuestMemory.CODE_BASE, initialSp: Long = GuestMemory.STACK_TOP) {
+    fun reset(startPc: Long = GuestMemory.CODE_BASE, initialSp: Long = GuestMemory.STACK_TOP, initialTlsBase: Long = GuestMemory.TLS_BASE) {
         for (i in x.indices) x[i] = 0L
         pc = startPc
         sp = initialSp
+        tlsBase = initialTlsBase
         flagN = false
         flagZ = true
         flagC = false

@@ -88,12 +88,33 @@ object HorizonKernelSvc {
                 val ipcSummary = FirmwareParser.MockHorizonKernel.dispatchIpcCall(handle)
 
                 // Write Horizon IPC Command Response Header (SFCO magic at TLS message buffer)
-                val tlsBuffer = cpu.sp - 0x100
+                val tlsBuffer = cpu.tlsBase
                 memory.write32(tlsBuffer, 0x4F434653) // "SFCO" magic
-                memory.write32(tlsBuffer + 4, 0)      // Result code: Success (0x0)
+                memory.write32(tlsBuffer + 4, 0)      // Reserved/Version
+                memory.write32(tlsBuffer + 8, 0)      // Result code: Success (0x0)
 
                 cpu.setX(0, 0L)
                 HorizonSvcLog(timestamp, 0x21, "svcSendSyncRequest", "handle=0x${handle.toString(16).uppercase()} -> $ipcSummary", "IPC ResultSuccess (0x0)")
+            }
+
+            0x1C -> { // svcCloseHandle
+                val handle = cpu.getX(0).toInt()
+                cpu.setX(0, 0L)
+                HorizonSvcLog(timestamp, 0x1C, "svcCloseHandle", "handle=0x${handle.toString(16).uppercase()}", "ResultSuccess (0x0)")
+            }
+
+            0x1E -> { // svcWaitSynchronization
+                val handleCount = cpu.getX(2).toInt()
+                cpu.setX(1, 0L) // Signaled handle index 0
+                cpu.setX(0, 0L) // ResultSuccess
+                HorizonSvcLog(timestamp, 0x1E, "svcWaitSynchronization", "handles=$handleCount", "ResultSuccess (0x0)")
+            }
+
+            0x35 -> { // svcGetProcessId
+                val handle = cpu.getX(1).toInt()
+                cpu.setX(1, 100L) // Process ID
+                cpu.setX(0, 0L)
+                HorizonSvcLog(timestamp, 0x35, "svcGetProcessId", "handle=0x${handle.toString(16).uppercase()} -> pid=100", "ResultSuccess (0x0)")
             }
 
             0x27 -> { // svcArbitrateLock

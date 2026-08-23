@@ -22,6 +22,13 @@ object SwitchKeysManager {
     fun getKeySet(): KeySet = currentKeySet
 
     /**
+     * Resets loaded keys to empty state.
+     */
+    fun clearKeys() {
+        currentKeySet = KeySet()
+    }
+
+    /**
      * Parses prod.keys or title.keys text file and extracts hex keys.
      */
     fun loadKeysFromFile(file: File): String {
@@ -67,9 +74,9 @@ object SwitchKeysManager {
                 headerKey = headerKey,
                 masterKeys = newMasterKeys,
                 titleKeys = newTitleKeys,
-                isLoaded = count > 0,
+                isLoaded = count > 0 && headerKey != null,
                 loadedKeyCount = count,
-                keySourceMessage = "Loaded $count cryptographic keys from ${file.name}"
+                keySourceMessage = "Loaded $count cryptographic keys from ${file.name} (header_key: ${if (headerKey != null) "OK" else "Missing"}, master_keys: ${newMasterKeys.size})"
             )
 
             currentKeySet.keySourceMessage
@@ -109,3 +116,4 @@ object SwitchKeysManager {
         }
     }
 }
+

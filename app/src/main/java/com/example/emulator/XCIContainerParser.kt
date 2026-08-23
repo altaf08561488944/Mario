@@ -124,17 +124,27 @@ object XCIContainerParser {
             "0100" + "%012X".format(packageIdLong and 0x00FFFFFF_FFFFFFFFL)
         } else ""
 
-        // Root HFS0 Offset determination
+        // Root HFS0 Offset determination from XCI Header (at 0x118) or 0x200
         var rootHfs0Offset = DEFAULT_ROOT_HFS0_OFFSET
-        if (data.size >= 0x204) {
+
+        // Read 64-bit Root HFS0 Offset at 0x118 if present
+        if (data.size >= 0x120) {
+            val hfs0Ptr = ByteBuffer.wrap(data, 0x118, 8).order(ByteOrder.LITTLE_ENDIAN).long
+            if (hfs0Ptr in 0x200L until data.size.toLong()) {
+                val ptrInt = hfs0Ptr.toInt()
+                if (ptrInt + 4 <= data.size &&
+                    data[ptrInt] == 'H'.code.toByte() && data[ptrInt + 1] == 'F'.code.toByte() &&
+                    data[ptrInt + 2] == 'S'.code.toByte() && data[ptrInt + 3] == '0'.code.toByte()) {
+                    rootHfs0Offset = hfs0Ptr
+                }
+            }
+        }
+
+        // Fallback check at 0x200
+        if (rootHfs0Offset == DEFAULT_ROOT_HFS0_OFFSET && data.size >= 0x204) {
             if (data[0x200] == 'H'.code.toByte() && data[0x201] == 'F'.code.toByte() &&
                 data[0x202] == 'S'.code.toByte() && data[0x203] == '0'.code.toByte()) {
                 rootHfs0Offset = 0x200L
-            } else {
-                val ptrOffset = ByteBuffer.wrap(data, 0x200, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong()
-                if (ptrOffset >= 0x200L && ptrOffset < data.size) {
-                    rootHfs0Offset = ptrOffset
-                }
             }
         }
 

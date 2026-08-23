@@ -57,6 +57,8 @@ object NroLoader {
         val flags: Int
     )
 
+    class KeyValidationException(val error: KeyManager.KeyValidationResult.Invalid) : Exception(error.message)
+
     fun loadExecutableIntoMemory(
         file: File,
         memory: GuestMemory,
@@ -139,6 +141,25 @@ object NroLoader {
                 requiredKeyMissing = !hasKeys
             )
 
+        } catch (e: KeyValidationException) {
+            val err = e.error
+            LoadResult.Failure(
+                reason = err.errorCode.name,
+                errorDetail = "${err.message} [Cartridge: ${file.name}]",
+                requiredKeyMissing = err.isMissingProdKeys,
+                suggestedAction = err.suggestedAction
+            )
+        } catch (e: KeyManager.DecryptionException) {
+            LoadResult.Failure(
+                reason = e.errorCode.name,
+                errorDetail = "${e.message} [Cartridge: ${file.name}]",
+                requiredKeyMissing = e.isMissingProdKeys,
+                suggestedAction = if (e.missingKeyName != null) {
+                    "Ensure your prod.keys contains a valid '${e.missingKeyName}'."
+                } else {
+                    "Verify your prod.keys and title.keys dumped from your Nintendo Switch console."
+                }
+            )
         } catch (e: Exception) {
             LoadResult.Failure(
                 reason = "CONTAINER_PARSING_ERROR",
@@ -258,12 +279,18 @@ object NroLoader {
                     val keySet = SwitchKeysManager.getKeySet()
                     if (keySet.headerKey != null && absOffset + 0xC00 <= data.size) {
                         val encryptedHeader = data.copyOfRange(absOffset, absOffset + 0xC00)
-                        val decryptedHeader = KeyManager.decryptNcaHeader(encryptedHeader, keySet.headerKey)
-                        val decryptedInfo = NcaHeaderParser.parseNcaHeader(decryptedHeader, 0)
-                        if (decryptedInfo.isNca) {
-                            ncaInfo = decryptedInfo
-                            decryptedNcaData = data.copyOfRange(absOffset, (absOffset + fileSize).coerceAtMost(data.size))
-                            System.arraycopy(decryptedHeader, 0, decryptedNcaData, 0, 0xC00)
+                        val decryptedHeader = try {
+                            KeyManager.decryptNcaHeader(encryptedHeader, keySet.headerKey)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        if (decryptedHeader != null) {
+                            val decryptedInfo = NcaHeaderParser.parseNcaHeader(decryptedHeader, 0)
+                            if (decryptedInfo.isNca) {
+                                ncaInfo = decryptedInfo
+                                decryptedNcaData = data.copyOfRange(absOffset, (absOffset + fileSize).coerceAtMost(data.size))
+                                System.arraycopy(decryptedHeader, 0, decryptedNcaData, 0, 0xC00)
+                            }
                         }
                     }
                 }
@@ -329,55 +356,79 @@ object NroLoader {
 
                 // Decrypt encrypted NCA section using KeyManager
                 if (section.cryptoType != 0) {
-                    val masterKey = keySet.masterKeys[ncaInfo.masterKeyRevision]
-                        ?: keySet.masterKeys[1]
-                        ?: keySet.masterKeys[0]
-                        ?: ByteArray(16) { 0x01 }
-
-                    val headerKey = keySet.headerKey ?: ByteArray(32) { 0x02 }
-
                     when (section.cryptoType) {
                         1 -> { // AES-XTS
+                            val masterKey = keySet.masterKeys[ncaInfo.masterKeyRevision]
+                                ?: keySet.masterKeys[1]
+                                ?: keySet.masterKeys[0]
+
+                            if (masterKey == null || masterKey.size < 16) {
+                                throw KeyValidationException(
+                                    KeyManager.KeyValidationResult.Invalid(
+                                        errorCode = KeyManager.KeyErrorCode.MISSING_MASTER_KEY,
+                                        message = "Required master_key_${ncaInfo.masterKeyRevision} not found in prod.keys for AES-XTS section decryption.",
+                                        missingKeyName = "master_key_${ncaInfo.masterKeyRevision}",
+                                        keyRevision = ncaInfo.masterKeyRevision,
+                                        isMissingProdKeys = true
+                                    )
+                                )
+                            }
+
+                            val headerKey = keySet.headerKey
+                            if (headerKey == null || headerKey.size < 32) {
+                                throw KeyValidationException(
+                                    KeyManager.KeyValidationResult.Invalid(
+                                        errorCode = KeyManager.KeyErrorCode.MISSING_HEADER_KEY,
+                                        message = "Required header_key (32 bytes) not found in prod.keys for AES-XTS section decryption.",
+                                        missingKeyName = "header_key",
+                                        isMissingProdKeys = true
+                                    )
+                                )
+                            }
+
                             val key1 = masterKey.copyOf(16)
-                            val key2 = if (headerKey.size >= 32) headerKey.copyOfRange(16, 32) else masterKey.copyOf(16)
-                            sectionBytes = KeyManager.decryptAesXts(
+                            val key2 = headerKey.copyOfRange(16, 32)
+                            val decrypted = KeyManager.decryptAesXts(
                                 data = sectionBytes,
                                 offset = 0,
                                 length = sectionBytes.size,
                                 key1 = key1,
                                 key2 = key2
                             )
+                            sectionBytes = decrypted
                         }
                         2, 3, 4 -> { // AES-CTR
-                            var ctrKey = keySet.titleKeys[ncaInfo.titleIdHex]
+                            val keyValidation = KeyManager.validateAndDeriveNcaContentKey(
+                                workingBuffer = workingBuffer,
+                                workingBaseOffset = workingBaseOffset,
+                                ncaInfo = ncaInfo,
+                                sectionIndex = section.sectionIndex,
+                                keySet = keySet
+                            )
 
-                            if (ctrKey == null && workingBaseOffset + 0x260 <= workingBuffer.size) {
-                                val encryptedKeyArea = workingBuffer.copyOfRange(workingBaseOffset + 0x220, workingBaseOffset + 0x260)
-                                val keyAreaKeySource = byteArrayOf(
-                                    0x5F, 0x12, 0x4D, 0x3C, 0x61, 0x1A, 0x29, 0x1B,
-                                    0x4B, 0x72, 0x18, 0x36, 0x42, 0x61, 0x55, 0x10
-                                )
-                                val kak = KeyManager.deriveKeyAreaKey(masterKey, keyAreaKeySource)
-                                val decryptedKeyArea = KeyManager.decryptKeyArea(encryptedKeyArea, kak)
-                                if (decryptedKeyArea.size >= 16) {
-                                    ctrKey = decryptedKeyArea.copyOf(16)
-                                }
+                            if (keyValidation is KeyManager.KeyValidationResult.Invalid) {
+                                throw KeyValidationException(keyValidation)
                             }
 
-                            if (ctrKey == null) {
-                                ctrKey = masterKey
-                            }
+                            val ctrKey = (keyValidation as KeyManager.KeyValidationResult.Valid).key
 
                             val ctrIv = ByteArray(16)
                             ByteBuffer.wrap(ctrIv).order(ByteOrder.BIG_ENDIAN).putInt(0, section.sectionIndex)
 
-                            sectionBytes = KeyManager.decryptAesCtr(
+                            val decrypted = KeyManager.decryptAesCtr(
                                 data = sectionBytes,
                                 offset = 0,
                                 length = sectionBytes.size,
                                 key = ctrKey,
                                 ctrIv = ctrIv
+                            ) ?: throw KeyValidationException(
+                                KeyManager.KeyValidationResult.Invalid(
+                                    errorCode = KeyManager.KeyErrorCode.DECRYPTION_FAILED,
+                                    message = "AES-CTR Decryption failed for NCA Section ${section.sectionIndex}."
+                                )
                             )
+
+                            sectionBytes = decrypted
                         }
                     }
                 }
@@ -472,6 +523,109 @@ object NroLoader {
         return NsoHeader(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     }
 
+    private fun parseMod0Header(data: ByteArray, baseOffset: Int, segmentSize: Int): Mod0Info {
+        if (data.size < baseOffset + 0x20 || segmentSize < 0x20) {
+            return Mod0Info()
+        }
+
+        // Search for "MOD0" magic in segment
+        val mod0OffsetInSegment = findMagicOffsetInRange(data, baseOffset, baseOffset + segmentSize.coerceAtMost(data.size - baseOffset), "MOD0")
+        if (mod0OffsetInSegment < 0 || mod0OffsetInSegment + 0x1C > data.size) {
+            return Mod0Info()
+        }
+
+        val buffer = ByteBuffer.wrap(data, mod0OffsetInSegment + 4, 0x18).order(ByteOrder.LITTLE_ENDIAN)
+        val dynamicOff = buffer.int
+        val bssStart = buffer.int
+        val bssEnd = buffer.int
+        val ehFrameStart = buffer.int
+        val ehFrameEnd = buffer.int
+        val moduleObjOff = buffer.int
+
+        val bssSize = (bssEnd - bssStart).coerceAtLeast(0)
+
+        return Mod0Info(
+            isMod0Valid = true,
+            dynamicOffset = dynamicOff,
+            bssStartOffset = bssStart,
+            bssEndOffset = bssEnd,
+            bssSizeBytes = bssSize,
+            ehFrameHdrStart = ehFrameStart,
+            ehFrameHdrEnd = ehFrameEnd,
+            moduleObjectOffset = moduleObjOff
+        )
+    }
+
+    private fun applyNsoRelocations(
+        memory: GuestMemory,
+        codeBaseAddress: Long,
+        dynamicOffset: Int
+    ): Int {
+        if (dynamicOffset == 0) return 0
+        var relocationsCount = 0
+        val dynamicAddress = codeBaseAddress + dynamicOffset
+
+        var dtRelaAddr = 0L
+        var dtRelaSize = 0L
+        var dtRelaEnt = 24L
+
+        // Parse .dynamic section tags
+        var currentTagOffset = 0L
+        while (currentTagOffset < 0x200L) { // Limit scan
+            val tag = memory.read64(dynamicAddress + currentTagOffset)
+            val value = memory.read64(dynamicAddress + currentTagOffset + 8)
+            if (tag == 0L) break // DT_NULL
+
+            when (tag) {
+                7L -> dtRelaAddr = codeBaseAddress + value // DT_RELA
+                8L -> dtRelaSize = value                    // DT_RELASZ
+                9L -> dtRelaEnt = value.coerceAtLeast(24L) // DT_RELAENT
+            }
+            currentTagOffset += 16
+        }
+
+        if (dtRelaAddr != 0L && dtRelaSize > 0) {
+            var currentRela = 0L
+            while (currentRela < dtRelaSize) {
+                val relaEntryAddr = dtRelaAddr + currentRela
+                val rOffset = memory.read64(relaEntryAddr)
+                val rInfo = memory.read64(relaEntryAddr + 8)
+                val rAddend = memory.read64(relaEntryAddr + 16)
+
+                val rType = (rInfo and 0xFFFFFFFFL).toInt()
+
+                when (rType) {
+                    1027, 0x403 -> { // R_AARCH64_RELATIVE
+                        val targetAddr = codeBaseAddress + rOffset
+                        val resolvedVal = codeBaseAddress + rAddend
+                        memory.write64(targetAddr, resolvedVal)
+                        relocationsCount++
+                    }
+                    1025, 257, 0x401 -> { // R_AARCH64_GLOB_DAT / R_AARCH64_ABS64
+                        val targetAddr = codeBaseAddress + rOffset
+                        val resolvedVal = codeBaseAddress + rAddend
+                        memory.write64(targetAddr, resolvedVal)
+                        relocationsCount++
+                    }
+                }
+                currentRela += dtRelaEnt
+            }
+        }
+
+        return relocationsCount
+    }
+
+    private fun setupThreadLocalStorage(memory: GuestMemory): Long {
+        val tlsBase = GuestMemory.TLS_BASE
+        // Zero out 64KB TLS region
+        for (i in 0 until 0x1000 step 8) {
+            memory.write64(tlsBase + i, 0L)
+        }
+        // Self-pointer at TLS Base (Thread Local Control Block)
+        memory.write64(tlsBase, tlsBase)
+        return tlsBase
+    }
+
     private fun loadNroSegments(
         data: ByteArray,
         baseOffset: Int,
@@ -494,8 +648,12 @@ object NroLoader {
             memory.loadBinary(GuestMemory.CODE_BASE + header.dataOffset, dataBytes)
         }
 
+        val tlsBase = setupThreadLocalStorage(memory)
+        val mod0Info = parseMod0Header(data, baseOffset + header.textOffset, header.textSize)
+        val relocs = applyNsoRelocations(memory, GuestMemory.CODE_BASE, mod0Info.dynamicOffset)
+
         val entryPoint = GuestMemory.CODE_BASE + header.textOffset
-        cpu.reset(startPc = entryPoint, initialSp = GuestMemory.STACK_TOP)
+        cpu.reset(startPc = entryPoint, initialSp = GuestMemory.STACK_TOP, initialTlsBase = tlsBase)
 
         val titleId = "0100" + filename.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
         val process = GuestProcess(
@@ -506,13 +664,16 @@ object NroLoader {
             mappedSegments = listOf(".text (${header.textSize}B)", ".rodata (${header.rodataSize}B)", ".data (${header.dataSize}B)"),
             stackPointer = GuestMemory.STACK_TOP,
             heapAddress = GuestMemory.HEAP_BASE,
+            tlsBaseAddress = tlsBase,
             modules = listOf(filename, "rtld", "sdk"),
-            loadedExecutableName = filename
+            loadedExecutableName = filename,
+            mod0Info = mod0Info,
+            relocationsApplied = relocs
         )
 
         return LoadResult.Success(
             guestProcess = process,
-            message = "✅ Loaded Real NRO0 Executable ($filename) -> .text=${header.textSize}B, .rodata=${header.rodataSize}B, .data=${header.dataSize}B @ 0x7100000000",
+            message = "✅ Loaded NRO0 Executable ($filename) -> .text=${header.textSize}B, relocs=$relocs, MOD0=${mod0Info.isMod0Valid} @ 0x7100000000",
             format = formatName,
             titleId = titleId,
             executableName = filename,
@@ -544,8 +705,21 @@ object NroLoader {
             memory.loadBinary(GuestMemory.CODE_BASE + header.dataMemOff, dataBytes)
         }
 
+        val tlsBase = setupThreadLocalStorage(memory)
+        val mod0Info = parseMod0Header(data, baseOffset + header.textFileOff, header.textSize)
+
+        // Zero BSS memory region if specified in MOD0
+        if (mod0Info.isMod0Valid && mod0Info.bssSizeBytes > 0) {
+            val bssAddr = GuestMemory.CODE_BASE + mod0Info.bssStartOffset
+            for (i in 0 until mod0Info.bssSizeBytes) {
+                memory.write8(bssAddr + i, 0)
+            }
+        }
+
+        val relocs = applyNsoRelocations(memory, GuestMemory.CODE_BASE, mod0Info.dynamicOffset)
+
         val entryPoint = GuestMemory.CODE_BASE + header.textMemOff
-        cpu.reset(startPc = entryPoint, initialSp = GuestMemory.STACK_TOP)
+        cpu.reset(startPc = entryPoint, initialSp = GuestMemory.STACK_TOP, initialTlsBase = tlsBase)
 
         val titleId = "0100" + filename.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
         val process = GuestProcess(
@@ -556,13 +730,16 @@ object NroLoader {
             mappedSegments = listOf(".text (${header.textSize}B)", ".rodata (${header.rodataSize}B)", ".data (${header.dataSize}B)"),
             stackPointer = GuestMemory.STACK_TOP,
             heapAddress = GuestMemory.HEAP_BASE,
+            tlsBaseAddress = tlsBase,
             modules = listOf(filename, "rtld", "sdk"),
-            loadedExecutableName = filename
+            loadedExecutableName = filename,
+            mod0Info = mod0Info,
+            relocationsApplied = relocs
         )
 
         return LoadResult.Success(
             guestProcess = process,
-            message = "✅ Loaded Real NSO0 Executable ($filename) -> .text=${header.textSize}B, .rodata=${header.rodataSize}B, .data=${header.dataSize}B @ 0x7100000000",
+            message = "✅ Loaded NSO0 Native Executable ($filename) -> .text=${header.textSize}B, relocs=$relocs, MOD0=${mod0Info.isMod0Valid} @ 0x7100000000",
             format = formatName,
             titleId = titleId,
             executableName = filename,
@@ -570,6 +747,22 @@ object NroLoader {
             rodataBytes = header.rodataSize,
             dataBytes = header.dataSize
         )
+    }
+
+    private fun findMagicOffsetInRange(data: ByteArray, startOffset: Int, endOffset: Int, magic: String): Int {
+        val bytes = magic.toByteArray(Charsets.US_ASCII)
+        val safeEnd = (endOffset - bytes.size).coerceAtMost(data.size - bytes.size)
+        for (i in startOffset until safeEnd) {
+            var match = true
+            for (j in bytes.indices) {
+                if (data[i + j] != bytes[j]) {
+                    match = false
+                    break
+                }
+            }
+            if (match) return i
+        }
+        return -1
     }
 
     private fun findMagicOffset(data: ByteArray, magic: String): Int {

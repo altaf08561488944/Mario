@@ -16,18 +16,21 @@ class GuestMemory {
 
     companion object {
         const val CODE_BASE = 0x7100000000L
+        const val TLS_BASE = 0x7000000000L
         const val STACK_TOP = 0x7F7FFFF000L
-        const val STACK_BASE = 0x7F70000000L
+        const val STACK_BASE = 0x7F7F000000L
         const val HEAP_BASE = 0x7F80000000L
         const val VRAM_BASE = 0x9000000000L
 
-        const val CODE_SIZE = 16 * 1024 * 1024 // 16MB Code Buffer
-        const val STACK_SIZE = 1 * 1024 * 1024  // 1MB Stack Buffer
-        const val HEAP_SIZE = 32 * 1024 * 1024  // 32MB Heap Buffer
+        const val CODE_SIZE = 64 * 1024 * 1024  // 64MB Executable Code Buffer
+        const val TLS_SIZE = 1 * 1024 * 1024    // 1MB Thread Local Storage Buffer
+        const val STACK_SIZE = 16 * 1024 * 1024 // 16MB Stack Buffer
+        const val HEAP_SIZE = 64 * 1024 * 1024  // 64MB Heap Buffer
         const val VRAM_SIZE = 16 * 1024 * 1024  // 16MB Framebuffer (Supports up to 1920x1080 ARGB)
     }
 
     private val codeBuffer = ByteBuffer.allocateDirect(CODE_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+    private val tlsBuffer = ByteBuffer.allocateDirect(TLS_SIZE).order(ByteOrder.LITTLE_ENDIAN)
     private val stackBuffer = ByteBuffer.allocateDirect(STACK_SIZE).order(ByteOrder.LITTLE_ENDIAN)
     private val heapBuffer = ByteBuffer.allocateDirect(HEAP_SIZE).order(ByteOrder.LITTLE_ENDIAN)
     private val vramBuffer = ByteBuffer.allocateDirect(VRAM_SIZE).order(ByteOrder.LITTLE_ENDIAN)
@@ -118,11 +121,12 @@ class GuestMemory {
     }
 
     // Returns raw VRAM ARGB integer array for Direct Compose Canvas rendering
-    fun getVramPixels(width: Int = 1280, height: Int = 720): IntArray {
+    fun getVramPixels(width: Int = 1280, height: Int = 720, framebufferOffset: Int = 0): IntArray {
         val size = width * height
         val pixels = IntArray(size)
         val copyBuffer = vramBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
-        copyBuffer.position(0)
+        val validOffset = framebufferOffset.coerceIn(0, (VRAM_SIZE - (size * 4)).coerceAtLeast(0))
+        copyBuffer.position(validOffset)
         for (i in 0 until size) {
             if (copyBuffer.remaining() >= 4) {
                 pixels[i] = copyBuffer.int
@@ -137,6 +141,7 @@ class GuestMemory {
     private fun resolveAddress(addr: Long): Pair<ByteBuffer, Int>? {
         return when {
             addr in CODE_BASE until (CODE_BASE + CODE_SIZE) -> Pair(codeBuffer, (addr - CODE_BASE).toInt())
+            addr in TLS_BASE until (TLS_BASE + TLS_SIZE) -> Pair(tlsBuffer, (addr - TLS_BASE).toInt())
             addr in STACK_BASE until (STACK_BASE + STACK_SIZE) -> Pair(stackBuffer, (addr - STACK_BASE).toInt())
             addr in HEAP_BASE until (HEAP_BASE + HEAP_SIZE) -> Pair(heapBuffer, (addr - HEAP_BASE).toInt())
             addr in VRAM_BASE until (VRAM_BASE + VRAM_SIZE) -> Pair(vramBuffer, (addr - VRAM_BASE).toInt())

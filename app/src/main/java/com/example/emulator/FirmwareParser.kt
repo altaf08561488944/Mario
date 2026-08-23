@@ -243,7 +243,9 @@ object FirmwareParser {
             val keySet = SwitchKeysManager.getKeySet()
             if (keySet.headerKey != null && headerBytes.size >= 0x400) {
                 val decryptedHeader = KeyManager.decryptNcaHeader(headerBytes, keySet.headerKey)
-                ncaInfo = NcaHeaderParser.parseNcaHeader(decryptedHeader, 0)
+                if (decryptedHeader != null) {
+                    ncaInfo = NcaHeaderParser.parseNcaHeader(decryptedHeader, 0)
+                }
             }
         }
 
@@ -298,6 +300,38 @@ object FirmwareParser {
         var isInitialized: Boolean = false,
         var totalRequestsHandled: Int = 0
     )
+
+    /**
+     * Horizon VI (Visual Interface) & NVN Display Service Frame Tracker.
+     * Manages guest display surface registration and honest frame submission verification.
+     */
+    object DisplayService {
+        var isSurfaceRegistered: Boolean = false
+            private set
+        var submittedFrameCount: Long = 0L
+            private set
+        var surfaceWidth: Int = 1280
+            private set
+        var surfaceHeight: Int = 720
+            private set
+
+        fun registerSurface(width: Int = 1280, height: Int = 720) {
+            isSurfaceRegistered = true
+            surfaceWidth = width
+            surfaceHeight = height
+        }
+
+        fun submitBuffer() {
+            submittedFrameCount++
+        }
+
+        fun reset() {
+            isSurfaceRegistered = false
+            submittedFrameCount = 0L
+            surfaceWidth = 1280
+            surfaceHeight = 720
+        }
+    }
 
     object MockHorizonKernel {
         private val dispatchers = mutableMapOf<String, ServiceDispatcher>()

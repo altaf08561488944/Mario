@@ -231,8 +231,8 @@ sealed class DecodedInstruction {
     data class MrsReg(val rt: Int, val sysReg: Int) : DecodedInstruction() {
         override val disassembly: String = "MRS X$rt, SYS_REG_$sysReg"
         override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
-            // Returns mock system register value (e.g. TPIDR_EL0 = TLS buffer @ SP - 0x100)
-            cpu.setX(rt, cpu.sp - 0x100)
+            // Returns system register value (e.g. TPIDR_EL0 = TLS Base @ 0x7000000000)
+            cpu.setX(rt, cpu.tlsBase)
             return null
         }
     }
@@ -240,6 +240,7 @@ sealed class DecodedInstruction {
     data class MsrReg(val sysReg: Int, val rt: Int) : DecodedInstruction() {
         override val disassembly: String = "MSR SYS_REG_$sysReg, X$rt"
         override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.tlsBase = cpu.getX(rt)
             return null
         }
     }

@@ -110,7 +110,8 @@ class SwitchCoreEngine {
         }
 
         // Initialize Horizon Mock Kernel & System Service Dispatch Table
-        FirmwareParser.MockHorizonKernel.initializeKernelEnvironment()
+        FirmwareParser.DisplayService.reset()
+        FirmwareParser.MockHorizonKernel.initializeKernelEnvironment(memory)
 
         _engineState.value = _engineState.value.copy(
             lifecycleState = GameLifecycleState.LOCATING_CONTENT,
@@ -245,8 +246,11 @@ class SwitchCoreEngine {
                 val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }
                 val totalExecuted = cpuCores.sumOf { it.instructionsExecuted }
 
-                // Check if Guest VRAM contains non-zero pixels
-                val hasGuestFrame = memory.read32(GuestMemory.VRAM_BASE) != 0
+                val renderWidth = if (_engineState.value.isDockedMode) 1920 else 1280
+                val renderHeight = if (_engineState.value.isDockedMode) 1080 else 720
+
+                // Perform MMIO register & display surface verification via VRAMController
+                val hasGuestFrame = gpu.hasValidGuestFramebuffer(memory, renderWidth, renderHeight, _engineState.value.isDevSelfTest)
                 val currentLifecycle = when {
                     _engineState.value.isDevSelfTest -> GameLifecycleState.PLAYABLE
                     hasGuestFrame && _engineState.value.lifecycleState == GameLifecycleState.EXECUTING -> GameLifecycleState.FIRST_FRAME
