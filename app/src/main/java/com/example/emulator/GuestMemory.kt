@@ -24,7 +24,7 @@ class GuestMemory {
         const val CODE_SIZE = 16 * 1024 * 1024 // 16MB Code Buffer
         const val STACK_SIZE = 1 * 1024 * 1024  // 1MB Stack Buffer
         const val HEAP_SIZE = 32 * 1024 * 1024  // 32MB Heap Buffer
-        const val VRAM_SIZE = 1280 * 720 * 4   // 3.68MB Framebuffer
+        const val VRAM_SIZE = 16 * 1024 * 1024  // 16MB Framebuffer (Supports up to 1920x1080 ARGB)
     }
 
     private val codeBuffer = ByteBuffer.allocateDirect(CODE_SIZE).order(ByteOrder.LITTLE_ENDIAN)

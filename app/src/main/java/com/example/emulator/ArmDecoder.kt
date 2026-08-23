@@ -185,6 +185,73 @@ sealed class DecodedInstruction {
         }
     }
 
+    data class LslImm(val rd: Int, val rn: Int, val shift: Int) : DecodedInstruction() {
+        override val disassembly: String = "LSL X$rd, X$rn, #$shift"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.setX(rd, cpu.getX(rn) shl shift)
+            return null
+        }
+    }
+
+    data class LsrImm(val rd: Int, val rn: Int, val shift: Int) : DecodedInstruction() {
+        override val disassembly: String = "LSR X$rd, X$rn, #$shift"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.setX(rd, cpu.getX(rn) ushr shift)
+            return null
+        }
+    }
+
+    data class AsrImm(val rd: Int, val rn: Int, val shift: Int) : DecodedInstruction() {
+        override val disassembly: String = "ASR X$rd, X$rn, #$shift"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.setX(rd, cpu.getX(rn) shr shift)
+            return null
+        }
+    }
+
+    data class LdxrReg(val rt: Int, val rn: Int) : DecodedInstruction() {
+        override val disassembly: String = "LDXR X$rt, [X$rn]"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val addr = cpu.getX(rn)
+            cpu.setX(rt, memory.read64(addr))
+            return null
+        }
+    }
+
+    data class StxrReg(val rs: Int, val rt: Int, val rn: Int) : DecodedInstruction() {
+        override val disassembly: String = "STXR W$rs, X$rt, [X$rn]"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            val addr = cpu.getX(rn)
+            memory.write64(addr, cpu.getX(rt))
+            cpu.setX(rs, 0L) // 0 = Exclusive store succeeded
+            return null
+        }
+    }
+
+    data class MrsReg(val rt: Int, val sysReg: Int) : DecodedInstruction() {
+        override val disassembly: String = "MRS X$rt, SYS_REG_$sysReg"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            // Returns mock system register value (e.g. TPIDR_EL0 = TLS buffer @ SP - 0x100)
+            cpu.setX(rt, cpu.sp - 0x100)
+            return null
+        }
+    }
+
+    data class MsrReg(val sysReg: Int, val rt: Int) : DecodedInstruction() {
+        override val disassembly: String = "MSR SYS_REG_$sysReg, X$rt"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            return null
+        }
+    }
+
+    data class FmovReg(val rd: Int, val rn: Int) : DecodedInstruction() {
+        override val disassembly: String = "FMOV D$rd, D$rn"
+        override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
+            cpu.setX(rd, cpu.getX(rn))
+            return null
+        }
+    }
+
     data class StrImm(val rt: Int, val rn: Int, val offset: Long) : DecodedInstruction() {
         override val disassembly: String = "STR X$rt, [${if (rn == 31) "SP" else "X$rn"}, #$offset]"
         override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
@@ -464,12 +531,50 @@ object ArmDecoder {
                 val signedOffset = (if (imm7 >= 64) imm7 - 128 else imm7) * 8L
                 DecodedInstruction.LdpImm(rt1, rt2, rn, signedOffset)
             }
+            // LDXR X1, [Xn] (0xC85F0000)
+            (opcode and 0x3FE00000.toInt()) == 0x085F0000 -> {
+                val rt = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                DecodedInstruction.LdxrReg(rt, rn)
+            }
+            // STXR Ws, Xt, [Xn] (0xC8000000)
+            (opcode and 0x3F000000.toInt()) == 0x08000000 -> {
+                val rt = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val rs = (opcode ushr 16) and 0x1F
+                DecodedInstruction.StxrReg(rs, rt, rn)
+            }
             else -> DecodedInstruction.Unknown(opcode)
         }
     }
 
     private fun decodeDataProcessingRegister(opcode: Int): DecodedInstruction {
         return when {
+            // MRS Xt, SYS_REG (0xD5300000)
+            (opcode and 0xFFF00000.toInt()) == 0xD5300000.toInt() -> {
+                val rt = opcode and 0x1F
+                val sysReg = (opcode ushr 5) and 0xFFFF
+                DecodedInstruction.MrsReg(rt, sysReg)
+            }
+            // MSR SYS_REG, Xt (0xD5100000)
+            (opcode and 0xFFF00000.toInt()) == 0xD5100000.toInt() -> {
+                val rt = opcode and 0x1F
+                val sysReg = (opcode ushr 5) and 0xFFFF
+                DecodedInstruction.MsrReg(sysReg, rt)
+            }
+            // LSL / LSR / ASR Xd, Xn, #shift (0xD3400000 / 0xD3000000)
+            (opcode and 0xFF800000.toInt()) == 0xD3400000.toInt() -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                val shift = (opcode ushr 10) and 0x3F
+                DecodedInstruction.LslImm(rd, rn, shift)
+            }
+            // FMOV Dd, Dn (0x1E204000)
+            (opcode and 0xFF203C00.toInt()) == 0x1E204000 -> {
+                val rd = opcode and 0x1F
+                val rn = (opcode ushr 5) and 0x1F
+                DecodedInstruction.FmovReg(rd, rn)
+            }
             // ADD Xd, Xn, Xm (0x8B000000)
             (opcode and 0xFF200000.toInt()) == 0x8B000000.toInt() -> {
                 val rd = opcode and 0x1F

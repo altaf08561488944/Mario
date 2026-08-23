@@ -169,10 +169,16 @@ object SwitchRomHeaderParser {
     }
 
     private fun parseNca(file: File, raf: RandomAccessFile, magic: String): SwitchRomMetadata {
-        raf.seek(0x200)
-        val titleIdBytes = ByteArray(8)
-        raf.readFully(titleIdBytes)
-        val titleIdHex = titleIdBytes.reversedArray().joinToString("") { "%02X".format(it) }
+        val buffer = ByteArray(0x400.coerceAtMost(file.length().toInt()))
+        raf.seek(0)
+        raf.readFully(buffer)
+
+        val ncaInfo = NcaHeaderParser.parseNcaHeader(buffer, 0)
+        val titleIdDerived = if (ncaInfo.isNca && ncaInfo.titleIdHex.length == 16) {
+            ncaInfo.titleIdHex
+        } else {
+            "0100" + file.nameWithoutExtension.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+        }
 
         return SwitchRomMetadata(
             fileName = file.name,
@@ -181,14 +187,14 @@ object SwitchRomHeaderParser {
             format = "NCA (Nintendo Content Archive)",
             magic = magic,
             isValidMagic = true,
-            titleId = if (titleIdHex.length == 16 && titleIdHex != "0000000000000000") titleIdHex else "0100" + file.nameWithoutExtension.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase(),
+            titleId = titleIdDerived,
             titleName = file.nameWithoutExtension.replace("_", " "),
-            masterKeyRevision = 16,
-            sdkVersion = "17.0.0",
+            masterKeyRevision = if (ncaInfo.isNca) ncaInfo.masterKeyRevision else 16,
+            sdkVersion = if (ncaInfo.isNca && ncaInfo.sdkVersion.isNotEmpty()) ncaInfo.sdkVersion else "17.0.0",
             details = mapOf(
                 "NCA Format" to magic,
-                "Content Section" to "Program / Control / Legal / Manual",
-                "Encryption" to "XTS-AES 128"
+                "Content Type" to (if (ncaInfo.isNca) ncaInfo.contentType.label else "Program"),
+                "Section Count" to "${ncaInfo.sections.size}"
             )
         )
     }

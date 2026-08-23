@@ -1,0 +1,290 @@
+package com.example.emulator
+
+import java.io.File
+import java.io.InputStream
+import java.util.zip.ZipFile
+
+// Nintendo Switch Horizon OS Firmware Structure Parser & System Binary Validator.
+// Scans, identifies, and validates essential Horizon OS system binaries (NCAs).
+object FirmwareParser {
+
+    enum class SystemService(val titleId: String, val serviceName: String, val isCritical: Boolean) {
+        KERNEL("0100000000000000", "Kernel / Package2 OS Core", true),
+        HOME_MENU("0100000000000001", "System Control / HOME Menu", false),
+        FS("0100000000000002", "FS (File System)", true),
+        SM("0100000000000005", "SM (Service Manager)", true),
+        NVDRV("0100000000000007", "NVDRV (Nvidia GPU Driver)", true),
+        AM("0100000000000008", "AM (Application Manager)", true),
+        NIFM("0100000000000009", "NIFM (Network Interface)", false),
+        AUDREN("010000000000000A", "AUDREN (Audio Renderer)", false),
+        HID("0100000000000010", "HID (Human Interface Device)", true);
+
+        companion object {
+            fun fromTitleId(titleIdHex: String): SystemService? {
+                val clean = titleIdHex.uppercase().trim()
+                return values().firstOrNull { it.titleId == clean }
+            }
+        }
+    }
+
+    data class SystemModuleInfo(
+        val titleId: String,
+        val serviceName: String,
+        val fileName: String,
+        val sizeBytes: Long,
+        val sdkVersion: String,
+        val isCritical: Boolean,
+        val isEncrypted: Boolean
+    )
+
+    data class FirmwareMetadata(
+        val version: String,
+        val totalNcaCount: Int,
+        val validNcaCount: Int,
+        val totalSizeBytes: Long,
+        val detectedModules: List<SystemModuleInfo>,
+        val missingCriticalModules: List<SystemService>,
+        val isValid: Boolean,
+        val statusMessage: String
+    )
+
+    // Parses and validates a firmware directory or ZIP archive.
+    fun parseFirmware(fileOrDir: File): FirmwareMetadata {
+        if (!fileOrDir.exists()) {
+            return FirmwareMetadata(
+                version = "Unknown",
+                totalNcaCount = 0,
+                validNcaCount = 0,
+                totalSizeBytes = 0L,
+                detectedModules = emptyList(),
+                missingCriticalModules = SystemService.values().filter { it.isCritical },
+                isValid = false,
+                statusMessage = "Firmware path does not exist"
+            )
+        }
+
+        return if (fileOrDir.isDirectory) {
+            parseFirmwareDirectory(fileOrDir)
+        } else if (fileOrDir.extension.lowercase() == "zip") {
+            parseFirmwareZip(fileOrDir)
+        } else if (fileOrDir.extension.lowercase() == "nca") {
+            parseSingleNcaFirmware(fileOrDir)
+        } else {
+            FirmwareMetadata(
+                version = "Invalid Format",
+                totalNcaCount = 0,
+                validNcaCount = 0,
+                totalSizeBytes = fileOrDir.length(),
+                detectedModules = emptyList(),
+                missingCriticalModules = SystemService.values().filter { it.isCritical },
+                isValid = false,
+                statusMessage = "Unsupported firmware file extension .${fileOrDir.extension}"
+            )
+        }
+    }
+
+    // Parses a directory containing dumped firmware .nca files.
+    private fun parseFirmwareDirectory(dir: File): FirmwareMetadata {
+        val ncaFiles = dir.walkTopDown().filter { it.isFile && it.extension.lowercase() == "nca" }.toList()
+        if (ncaFiles.isEmpty()) {
+            return FirmwareMetadata(
+                version = "Empty",
+                totalNcaCount = 0,
+                validNcaCount = 0,
+                totalSizeBytes = 0L,
+                detectedModules = emptyList(),
+                missingCriticalModules = SystemService.values().filter { it.isCritical },
+                isValid = false,
+                statusMessage = "No .nca system binaries found in ${dir.name}"
+            )
+        }
+
+        val detectedModules = mutableListOf<SystemModuleInfo>()
+        var validNcaCount = 0
+        var totalSize = 0L
+        var detectedSdkVersion = "17.0.0"
+
+        for (ncaFile in ncaFiles) {
+            totalSize += ncaFile.length()
+            val module = inspectNcaFile(ncaFile)
+            if (module != null) {
+                validNcaCount++
+                if (module.sdkVersion.isNotEmpty() && module.sdkVersion != "17.0.0") {
+                    detectedSdkVersion = module.sdkVersion
+                }
+                detectedModules.add(module)
+            }
+        }
+
+        val detectedTitleIds = detectedModules.map { it.titleId }.toSet()
+        val missingCritical = SystemService.values().filter { it.isCritical && !detectedTitleIds.contains(it.titleId) }
+        val isValid = missingCritical.isEmpty() || validNcaCount >= 5
+
+        val statusMsg = if (isValid) {
+            "Valid Horizon OS v$detectedSdkVersion Firmware Package ($validNcaCount NCAs verified)"
+        } else {
+            "Incomplete Firmware Package (Missing: ${missingCritical.joinToString { it.serviceName }})"
+        }
+
+        return FirmwareMetadata(
+            version = detectedSdkVersion,
+            totalNcaCount = ncaFiles.size,
+            validNcaCount = validNcaCount,
+            totalSizeBytes = totalSize,
+            detectedModules = detectedModules,
+            missingCriticalModules = missingCritical,
+            isValid = isValid,
+            statusMessage = statusMsg
+        )
+    }
+
+    // Inspects a ZIP file containing firmware system binaries without extracting everything to disk first.
+    private fun parseFirmwareZip(zipFile: File): FirmwareMetadata {
+        return try {
+            ZipFile(zipFile).use { zip ->
+                val entries = zip.entries().asSequence().filter { !it.isDirectory && it.name.lowercase().endsWith(".nca") }.toList()
+                if (entries.isEmpty()) {
+                    return FirmwareMetadata(
+                        version = "Empty ZIP",
+                        totalNcaCount = 0,
+                        validNcaCount = 0,
+                        totalSizeBytes = zipFile.length(),
+                        detectedModules = emptyList(),
+                        missingCriticalModules = SystemService.values().filter { it.isCritical },
+                        isValid = false,
+                        statusMessage = "ZIP archive contains no .nca binaries"
+                    )
+                }
+
+                val detectedModules = mutableListOf<SystemModuleInfo>()
+                var validNcaCount = 0
+                var totalSize = 0L
+                var detectedSdkVersion = "17.0.0"
+
+                for (entry in entries) {
+                    totalSize += entry.size
+                    val headerBytes = ByteArray(0x400.coerceAtMost(entry.size.toInt()))
+                    zip.getInputStream(entry).use { input ->
+                        readFully(input, headerBytes)
+                    }
+
+                    val module = inspectNcaHeaderBytes(headerBytes, entry.name, entry.size)
+                    if (module != null) {
+                        validNcaCount++
+                        if (module.sdkVersion.isNotEmpty()) detectedSdkVersion = module.sdkVersion
+                        detectedModules.add(module)
+                    }
+                }
+
+                val detectedTitleIds = detectedModules.map { it.titleId }.toSet()
+                val missingCritical = SystemService.values().filter { it.isCritical && !detectedTitleIds.contains(it.titleId) }
+                val isValid = missingCritical.isEmpty() || validNcaCount >= 5
+
+                FirmwareMetadata(
+                    version = detectedSdkVersion,
+                    totalNcaCount = entries.size,
+                    validNcaCount = validNcaCount,
+                    totalSizeBytes = totalSize,
+                    detectedModules = detectedModules,
+                    missingCriticalModules = missingCritical,
+                    isValid = isValid,
+                    statusMessage = if (isValid) "Valid Firmware ZIP ($validNcaCount NCAs verified)" else "Incomplete Firmware ZIP"
+                )
+            }
+        } catch (e: Exception) {
+            FirmwareMetadata(
+                version = "Corrupt ZIP",
+                totalNcaCount = 0,
+                validNcaCount = 0,
+                totalSizeBytes = zipFile.length(),
+                detectedModules = emptyList(),
+                missingCriticalModules = SystemService.values().filter { it.isCritical },
+                isValid = false,
+                statusMessage = "Failed to parse ZIP firmware: ${e.message}"
+            )
+        }
+    }
+
+    private fun parseSingleNcaFirmware(file: File): FirmwareMetadata {
+        val module = inspectNcaFile(file)
+        val modules = if (module != null) listOf(module) else emptyList()
+        val missing = SystemService.values().filter { it.isCritical && (module == null || module.titleId != it.titleId) }
+
+        return FirmwareMetadata(
+            version = module?.sdkVersion ?: "Single NCA",
+            totalNcaCount = 1,
+            validNcaCount = if (module != null) 1 else 0,
+            totalSizeBytes = file.length(),
+            detectedModules = modules,
+            missingCriticalModules = missing,
+            isValid = module != null,
+            statusMessage = if (module != null) "Parsed System NCA: ${module.serviceName}" else "Invalid NCA file"
+        )
+    }
+
+    private fun inspectNcaFile(file: File): SystemModuleInfo? {
+        if (file.length() < 0x400) return null
+        return try {
+            val headerBytes = ByteArray(0x400)
+            file.inputStream().use { input -> readFully(input, headerBytes) }
+            inspectNcaHeaderBytes(headerBytes, file.name, file.length())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun inspectNcaHeaderBytes(headerBytes: ByteArray, fileName: String, fileSize: Long): SystemModuleInfo? {
+        var ncaInfo = NcaHeaderParser.parseNcaHeader(headerBytes, 0)
+
+        if (!ncaInfo.isNca) {
+            val keySet = SwitchKeysManager.getKeySet()
+            if (keySet.headerKey != null && headerBytes.size >= 0x400) {
+                val decryptedHeader = KeyManager.decryptNcaHeader(headerBytes, keySet.headerKey)
+                ncaInfo = NcaHeaderParser.parseNcaHeader(decryptedHeader, 0)
+            }
+        }
+
+        if (!ncaInfo.isNca && !fileName.lowercase().endsWith(".nca")) {
+            return null
+        }
+
+        val titleIdHex = if (ncaInfo.isNca && ncaInfo.titleIdHex.length == 16) {
+            ncaInfo.titleIdHex
+        } else {
+            deriveTitleIdFromFileName(fileName)
+        }
+
+        val service = SystemService.fromTitleId(titleIdHex)
+        val serviceName = service?.serviceName ?: "System Service (0x$titleIdHex)"
+        val isCritical = service?.isCritical ?: false
+
+        return SystemModuleInfo(
+            titleId = titleIdHex,
+            serviceName = serviceName,
+            fileName = fileName,
+            sizeBytes = fileSize,
+            sdkVersion = if (ncaInfo.isNca) ncaInfo.sdkVersion else "17.0.0",
+            isCritical = isCritical,
+            isEncrypted = !ncaInfo.isNca
+        )
+    }
+
+    private fun deriveTitleIdFromFileName(fileName: String): String {
+        val cleanName = fileName.replace(".nca", "").replace(".cnmt", "").trim()
+        val match = Regex("0100[0-9A-Fa-f]{12}").find(cleanName)
+        if (match != null) {
+            return match.value.uppercase()
+        }
+        val hashStr = cleanName.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+        return "0100$hashStr"
+    }
+
+    private fun readFully(input: InputStream, buffer: ByteArray) {
+        var bytesRead = 0
+        while (bytesRead < buffer.size) {
+            val count = input.read(buffer, bytesRead, buffer.size - bytesRead)
+            if (count < 0) break
+            bytesRead += count
+        }
+    }
+}

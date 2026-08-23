@@ -49,8 +49,8 @@ class TegraGpuEmulator {
         var hasGuestVramData = false
         val vramSample = memory.read32(GuestMemory.VRAM_BASE)
         if (vramSample != 0) {
-            val vramPixels = memory.getVramPixels(1280, 720)
-            bitmap.setPixels(vramPixels, 0, 1280, 0, 0, 1280.coerceAtMost(width), 720.coerceAtMost(height))
+            val vramPixels = memory.getVramPixels(width, height)
+            bitmap.setPixels(vramPixels, 0, width, 0, 0, width, height)
             hasGuestVramData = true
         } else {
             // Dark Gradient Background Clear for Diagnostic Mode

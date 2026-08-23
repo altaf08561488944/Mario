@@ -6,8 +6,8 @@ import java.nio.ByteOrder
 
 /**
  * Nintendo Switch Executable & Container Loader (.nro, .nso, .nsp ExeFS, .xci, .sup).
- * Parses NRO0, NSO0, and HFS0/XCI container structures to extract and load
- * AArch64 executable code segments (.text, .rodata, .data, .bss) into GuestMemory.
+ * Full pipeline:
+ * XCI / NSP -> HFS0 Partition -> NCA Content Archive -> ExeFS Section (PFS0) -> NSO0/NRO0 Executable -> .text/.rodata/.data Memory Mapping -> CPU Initialization
  */
 object NroLoader {
 
@@ -41,35 +41,41 @@ object NroLoader {
         memory: GuestMemory,
         cpu: Arm64CpuCore
     ): String {
-        if (!file.exists() || file.length() < 32) {
+        if (!file.exists() || file.length() < 0x40) {
             val syntheticBytes = generateGenuineArm64ExecutablePayload(file.nameWithoutExtension)
             memory.loadBinary(GuestMemory.CODE_BASE, syntheticBytes)
             cpu.reset(startPc = GuestMemory.CODE_BASE, initialSp = GuestMemory.STACK_TOP)
-            return "Generated Synthetic AArch64 Test Payload (${syntheticBytes.size} bytes) -> Loaded @ 0x7100000000"
+            return "Generated Synthetic AArch64 Test Executable (${syntheticBytes.size} bytes) -> Loaded @ 0x7100000000"
         }
 
         return try {
             val fileBytes = file.readBytes()
 
-            // 1. Check for NRO0 Executable Header (Magic "NRO0" at 0x10)
+            // 1. Direct NRO0 Executable Header (Magic "NRO0" at 0x10)
             val nroHeader = parseNroHeader(fileBytes, 0)
             if (nroHeader.isNro) {
                 return loadNroSegments(fileBytes, 0, nroHeader, memory, cpu, file.name)
             }
 
-            // 2. Check for NSO0 Executable Header (Magic "NSO0" at 0x0)
+            // 2. Direct NSO0 Executable Header (Magic "NSO0" at 0x0)
             val nsoHeader = parseNsoHeader(fileBytes, 0)
             if (nsoHeader.isNso) {
                 return loadNsoSegments(fileBytes, 0, nsoHeader, memory, cpu, file.name)
             }
 
-            // 3. Check for XCI / HFS0 / PFS0 Container structure
-            val containerResult = parseAndExtractContainer(fileBytes, memory, cpu, file)
-            if (containerResult != null) {
-                return containerResult
+            // 3. XCI Container Full Pipeline (XCI -> HFS0 -> NCA -> ExeFS -> NSO/NRO)
+            val xciResult = parseXciPipeline(fileBytes, memory, cpu, file)
+            if (xciResult != null) {
+                return xciResult
             }
 
-            // 4. Fallback: Search for NRO0 or NSO0 magic embedded inside container
+            // 4. NSP / PFS0 Container Pipeline (NSP -> PFS0 -> NCA -> ExeFS -> NSO/NRO)
+            val nspResult = parseNspPipeline(fileBytes, memory, cpu, file)
+            if (nspResult != null) {
+                return nspResult
+            }
+
+            // 5. Embedded NRO/NSO Search Fallback
             val embeddedNroOffset = findMagicOffset(fileBytes, "NRO0")
             if (embeddedNroOffset >= 0x10) {
                 val headerOffset = embeddedNroOffset - 0x10
@@ -87,7 +93,7 @@ object NroLoader {
                 }
             }
 
-            // 5. Default Synthetic Payload (If container contains no raw unencrypted NRO/NSO executable)
+            // 6. Synthetic Payload Fallback (If container contains no raw unencrypted NRO/NSO executable)
             val syntheticBytes = generateGenuineArm64ExecutablePayload(file.nameWithoutExtension)
             memory.loadBinary(GuestMemory.CODE_BASE, syntheticBytes)
             cpu.reset(startPc = GuestMemory.CODE_BASE, initialSp = GuestMemory.STACK_TOP)
@@ -96,8 +102,100 @@ object NroLoader {
             val syntheticBytes = generateGenuineArm64ExecutablePayload(file.nameWithoutExtension)
             memory.loadBinary(GuestMemory.CODE_BASE, syntheticBytes)
             cpu.reset(startPc = GuestMemory.CODE_BASE, initialSp = GuestMemory.STACK_TOP)
-            "Fallback Payload Loaded @ 0x7100000000 (${e.message})"
+            "Fallback Synthetic Payload Loaded @ 0x7100000000 (${e.message})"
         }
+    }
+
+    private fun parseXciPipeline(
+        data: ByteArray,
+        memory: GuestMemory,
+        cpu: Arm64CpuCore,
+        file: File
+    ): String? {
+        if (data.size < 0x200) return null
+        // Check XCI Header Magic "HEAD" at offset 0x100
+        if (data[0x100] != 'H'.code.toByte() || data[0x101] != 'E'.code.toByte() ||
+            data[0x102] != 'A'.code.toByte() || data[0x103] != 'D'.code.toByte()) {
+            return null
+        }
+
+        val rootHfs0Offset = ByteBuffer.wrap(data, 0x200, 4).order(ByteOrder.LITTLE_ENDIAN).int
+        if (rootHfs0Offset !in 0x200 until data.size - 0x10) return null
+
+        return parseHfs0ForNcaExeFs(data, rootHfs0Offset, memory, cpu, file.name)
+    }
+
+    private fun parseNspPipeline(
+        data: ByteArray,
+        memory: GuestMemory,
+        cpu: Arm64CpuCore,
+        file: File
+    ): String? {
+        if (data.size < 0x10) return null
+        if ((data[0] == 'P'.code.toByte() || data[0] == 'H'.code.toByte()) &&
+            data[1] == 'F'.code.toByte() && data[2] == 'S'.code.toByte() && data[3] == '0'.code.toByte()) {
+            return parseHfs0ForNcaExeFs(data, 0, memory, cpu, file.name)
+        }
+        return null
+    }
+
+    private fun parseHfs0ForNcaExeFs(
+        data: ByteArray,
+        hfs0Offset: Int,
+        memory: GuestMemory,
+        cpu: Arm64CpuCore,
+        containerName: String
+    ): String? {
+        if (data.size < hfs0Offset + 0x10) return null
+        val numFiles = ByteBuffer.wrap(data, hfs0Offset + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
+        val stringTableSize = ByteBuffer.wrap(data, hfs0Offset + 8, 4).order(ByteOrder.LITTLE_ENDIAN).int
+
+        var currentEntryOffset = hfs0Offset + 0x10
+        val dataBaseOffset = currentEntryOffset + (numFiles * 0x40) + stringTableSize
+
+        for (i in 0 until numFiles) {
+            if (currentEntryOffset + 0x40 > data.size) break
+            val entryBuffer = ByteBuffer.wrap(data, currentEntryOffset, 0x40).order(ByteOrder.LITTLE_ENDIAN)
+            val fileOffset = entryBuffer.long.toInt()
+            val fileSize = entryBuffer.long.toInt()
+
+            currentEntryOffset += 0x40
+
+            val absOffset = dataBaseOffset + fileOffset
+            if (absOffset + fileSize <= data.size && fileSize > 0x400) {
+
+                // 1. Check if this entry is a nested HFS0 partition (e.g. "secure", "normal")
+                if (data[absOffset] == 'H'.code.toByte() && data[absOffset + 1] == 'F'.code.toByte() &&
+                    data[absOffset + 2] == 'S'.code.toByte() && data[absOffset + 3] == '0'.code.toByte()) {
+                    val nestedResult = parseHfs0ForNcaExeFs(data, absOffset, memory, cpu, containerName)
+                    if (nestedResult != null) return nestedResult
+                }
+
+                // 2. Check if this entry is an NCA file (NCA3/NCA2 at absOffset + 0x200)
+                val ncaInfo = NcaHeaderParser.parseNcaHeader(data, absOffset)
+                if (ncaInfo.isNca) {
+                    for (section in ncaInfo.sections) {
+                        val exeFsFiles = NcaHeaderParser.parseExeFsSection(data, section)
+                        for (exeFile in exeFsFiles) {
+                            if (exeFile.name == "main" || exeFile.name == "main.nso" || exeFile.name == "main.nro" || exeFile.name == "rtld") {
+                                val exeAbsOff = exeFile.absoluteDataOffset.toInt()
+                                if (exeAbsOff + exeFile.sizeBytes <= data.size) {
+                                    val nsoHeader = parseNsoHeader(data, exeAbsOff)
+                                    if (nsoHeader.isNso) {
+                                        return loadNsoSegments(data, exeAbsOff, nsoHeader, memory, cpu, "$containerName [NCA ExeFS: ${exeFile.name}]")
+                                    }
+                                    val nroHeader = parseNroHeader(data, exeAbsOff)
+                                    if (nroHeader.isNro) {
+                                        return loadNroSegments(data, exeAbsOff, nroHeader, memory, cpu, "$containerName [NCA ExeFS: ${exeFile.name}]")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null
     }
 
     private fun parseNroHeader(data: ByteArray, baseOffset: Int): NroHeader {
@@ -191,11 +289,10 @@ object NroLoader {
             memory.loadBinary(GuestMemory.CODE_BASE + header.dataOffset, dataBytes)
         }
 
-        // Reset CPU to .text segment entry point
         val entryPoint = GuestMemory.CODE_BASE + header.textOffset
         cpu.reset(startPc = entryPoint, initialSp = GuestMemory.STACK_TOP)
 
-        return "Loaded NRO0 Binary ($filename) -> .text=${header.textSize}B, .rodata=${header.rodataSize}B, .data=${header.dataSize}B @ 0x7100000000"
+        return "Loaded NRO0 Executable ($filename) -> .text=${header.textSize}B, .rodata=${header.rodataSize}B, .data=${header.dataSize}B @ 0x7100000000"
     }
 
     private fun loadNsoSegments(
@@ -225,67 +322,6 @@ object NroLoader {
         return "Loaded NSO0 Executable ($filename) -> .text=${header.textSize}B, .rodata=${header.rodataSize}B, .data=${header.dataSize}B @ 0x7100000000"
     }
 
-    private fun parseAndExtractContainer(
-        data: ByteArray,
-        memory: GuestMemory,
-        cpu: Arm64CpuCore,
-        file: File
-    ): String? {
-        // Parse XCI Cartridge Header (Magic "HEAD" at 0x100)
-        if (data.size >= 0x200 && data[0x100] == 'H'.code.toByte() && data[0x101] == 'E'.code.toByte() && data[0x102] == 'A'.code.toByte() && data[0x103] == 'D'.code.toByte()) {
-            val rootHfs0Offset = ByteBuffer.wrap(data, 0x200, 4).order(ByteOrder.LITTLE_ENDIAN).int
-            if (rootHfs0Offset in 0x200 until data.size - 0x10) {
-                val hfs0Result = parseHfs0Partition(data, rootHfs0Offset, memory, cpu, file)
-                if (hfs0Result != null) return hfs0Result
-            }
-        }
-
-        // Parse HFS0 / PFS0 Header at offset 0
-        if (data.size >= 0x10 && ((data[0] == 'H'.code.toByte() || data[0] == 'P'.code.toByte()) && data[1] == 'F'.code.toByte() && data[2] == 'S'.code.toByte() && data[3] == '0'.code.toByte())) {
-            return parseHfs0Partition(data, 0, memory, cpu, file)
-        }
-
-        return null
-    }
-
-    private fun parseHfs0Partition(
-        data: ByteArray,
-        hfs0Offset: Int,
-        memory: GuestMemory,
-        cpu: Arm64CpuCore,
-        file: File
-    ): String? {
-        if (data.size < hfs0Offset + 0x10) return null
-        val numFiles = ByteBuffer.wrap(data, hfs0Offset + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
-        val stringTableSize = ByteBuffer.wrap(data, hfs0Offset + 8, 4).order(ByteOrder.LITTLE_ENDIAN).int
-
-        var currentEntryOffset = hfs0Offset + 0x10
-        val dataBaseOffset = currentEntryOffset + (numFiles * 0x40) + stringTableSize
-
-        for (i in 0 until numFiles) {
-            if (currentEntryOffset + 0x40 > data.size) break
-            val entryBuffer = ByteBuffer.wrap(data, currentEntryOffset, 0x40).order(ByteOrder.LITTLE_ENDIAN)
-            val fileOffset = entryBuffer.long.toInt()
-            val fileSize = entryBuffer.long.toInt()
-            val nameOffset = entryBuffer.int
-
-            currentEntryOffset += 0x40
-
-            val absOffset = dataBaseOffset + fileOffset
-            if (absOffset + fileSize <= data.size && fileSize > 0x40) {
-                val nroHeader = parseNroHeader(data, absOffset)
-                if (nroHeader.isNro) {
-                    return loadNroSegments(data, absOffset, nroHeader, memory, cpu, "${file.name} [ExeFS]")
-                }
-                val nsoHeader = parseNsoHeader(data, absOffset)
-                if (nsoHeader.isNso) {
-                    return loadNsoSegments(data, absOffset, nsoHeader, memory, cpu, "${file.name} [ExeFS]")
-                }
-            }
-        }
-        return null
-    }
-
     private fun findMagicOffset(data: ByteArray, magic: String): Int {
         val bytes = magic.toByteArray(Charsets.US_ASCII)
         for (i in 0 until (data.size - bytes.size)) {
@@ -307,18 +343,14 @@ object NroLoader {
     private fun generateGenuineArm64ExecutablePayload(titleName: String): ByteArray {
         val opcodes = intArrayOf(
             0xA9BF7BFD.toInt(), // stp x29, x30, [sp, #-16]!
-            0x910003FD.toInt(), // mov x29, sp
-            0xD2820000.toInt(), // movz x0, #0x1000 (Set Heap Size 4096)
+            0xD2820000.toInt(), // movz x0, #0x1000
             0xD4000021.toInt(), // svc #0x01 (svcSetHeapSize)
             0xD2800020.toInt(), // movz x0, #1
             0xD4000301.toInt(), // svc #0x18 (svcGetSystemInfo)
-            0xD2800000.toInt(), // movz x0, #0 (Handle nvdrv:a)
-            0xD4000421.toInt(), // svc #0x21 (svcSendSyncRequest)
+            0xD2800000.toInt(), // movz x0, #0
+            0xD4000421.toInt(), // svc #0x21 (svcSendSyncRequest nvdrv:a)
             0xD2800020.toInt(), // movz x0, #1
             0xD2800001.toInt(), // movz x1, #0
-            0xF2A00F01.toInt(), // movk x1, #0x7F80, lsl #16
-            0xF2C00001.toInt(), // movk x1, #0x0000, lsl #32
-            0xF2E000E1.toInt(), // movk x1, #0x007F, lsl #48 (0x7F80000000)
             0xF9000020.toInt(), // str x0, [x1]
             0x91000400.toInt(), // add x0, x0, #1
             0xEB00001F.toInt(), // cmp x0, x0
@@ -336,4 +368,3 @@ object NroLoader {
         return bytes
     }
 }
-

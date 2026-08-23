@@ -148,13 +148,16 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
     fun selectFirmwareFile(name: String, path: String) {
         viewModelScope.launch {
             val current = repository.getBootConfig()
+            val firmwareFile = java.io.File(path)
+            val metadata = com.example.emulator.FirmwareParser.parseFirmware(firmwareFile)
+
             val updated = current.copy(
-                firmwareName = name,
+                firmwareName = if (metadata.isValid) "$name (${metadata.version})" else name,
                 firmwarePath = path,
-                isFirmwareVerified = true
+                isFirmwareVerified = metadata.isValid
             )
             repository.updateBootConfig(updated)
-            showUserMessage("Firmware package set: $name")
+            showUserMessage(metadata.statusMessage)
         }
     }
 

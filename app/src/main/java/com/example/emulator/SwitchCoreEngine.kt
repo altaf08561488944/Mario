@@ -81,8 +81,11 @@ class SwitchCoreEngine {
             SwitchRomHeaderParser.parseRomFile(romFile)
         } else null
 
-        // Reset CPU cores & Memory
-        cpuCores.forEach { it.reset() }
+        // Reset CPU cores & Memory (Core 0 = Primary Guest Thread, Cores 1-3 = Halted until created)
+        cpuCores.forEachIndexed { id, core ->
+            core.reset()
+            if (id > 0) core.isHalted = true
+        }
 
         // Load binary machine code into Guest Memory
         val loaderMsg = NroLoader.loadExecutableIntoMemory(romFile, memory, cpuCores[0])
@@ -122,17 +125,21 @@ class SwitchCoreEngine {
                 delay(16) // ~60 FPS Frame Rate
 
                 frameCounter++
-                val activeCoreIndex = (frameCounter % 4).toInt()
-                val activeCore = cpuCores[activeCoreIndex]
-
-                // Execute 12 real ARM64 instruction cycles per frame cycle
+                val activeCores = cpuCores.filter { !it.isHalted }
                 var lastDisasm = "NOP"
-                for (step in 0 until 12) {
-                    val svcLog = activeCore.executeStep(memory)
-                    lastDisasm = activeCore.lastDisassembly
-                    if (svcLog != null) {
-                        svcLogHistory.add(0, svcLog)
-                        if (svcLogHistory.size > 25) svcLogHistory.removeAt(svcLogHistory.size - 1)
+                var activeCoreIndex = 0
+
+                if (activeCores.isNotEmpty()) {
+                    for (core in activeCores) {
+                        activeCoreIndex = core.coreId
+                        for (step in 0 until 12) {
+                            val svcLog = core.executeStep(memory)
+                            lastDisasm = core.lastDisassembly
+                            if (svcLog != null) {
+                                svcLogHistory.add(0, svcLog)
+                                if (svcLogHistory.size > 25) svcLogHistory.removeAt(svcLogHistory.size - 1)
+                            }
+                        }
                     }
                 }
 
