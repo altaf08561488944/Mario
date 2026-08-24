@@ -99,6 +99,10 @@ class VRAMController {
 
     val layer0 = DisplayLayer(layerId = 0, framebufferAddress = PRIMARY_FRAMEBUFFER_BASE)
     val layer1 = DisplayLayer(layerId = 1, framebufferAddress = SECONDARY_FRAMEBUFFER_BASE)
+    
+    // Double Buffering (Swap Chain) Implementation for Tear-Free presentation
+    var frontBufferAddress: Long = PRIMARY_FRAMEBUFFER_BASE
+    var backBufferAddress: Long = SECONDARY_FRAMEBUFFER_BASE
     val vsyncInfo = VsyncInfo()
 
     var isDisplayEngineActive: Boolean = false
@@ -245,6 +249,13 @@ class VRAMController {
      */
     fun submitFrame(layerId: Int = 0) {
         val targetLayer = if (layerId == 0) layer0 else layer1
+        
+        // Double Buffering: Swap front and back buffer pointers to prevent visual tearing
+        val temp = frontBufferAddress
+        frontBufferAddress = backBufferAddress
+        backBufferAddress = temp
+        
+        targetLayer.framebufferAddress = frontBufferAddress
         targetLayer.submittedFrames++
         targetLayer.lastPresentTimestamp = System.currentTimeMillis()
         targetLayer.state = FramebufferState.DISPLAYING

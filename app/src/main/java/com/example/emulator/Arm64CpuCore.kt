@@ -26,6 +26,9 @@ class Arm64CpuCore(val coreId: Int) {
     var lastDisassembly: String = "NOP"
     var lastSvcLog: HorizonSvcLog? = null
 
+    // Simple Fast JIT / Translation Cache (stores pre-decoded instructions to prevent lag)
+    private val translationCache = HashMap<Long, DecodedInstruction>()
+
     fun reset(startPc: Long = GuestMemory.CODE_BASE, initialSp: Long = GuestMemory.STACK_TOP, initialTlsBase: Long = GuestMemory.TLS_BASE) {
         for (i in x.indices) x[i] = 0L
         pc = startPc

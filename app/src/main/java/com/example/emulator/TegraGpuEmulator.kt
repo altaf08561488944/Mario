@@ -75,7 +75,8 @@ class TegraGpuEmulator {
         // 2. Check if Guest Code has configured active display layer and submitted frames
         val hasGuestVramData = hasValidGuestFramebuffer(memory, width, height, isDevSelfTest)
         if (hasGuestVramData && !isDevSelfTest) {
-            val activeFbAddr = vramController.layer0.framebufferAddress
+            // Read from the active front buffer to prevent screen tearing
+            val activeFbAddr = vramController.frontBufferAddress
             val fbOffset = (activeFbAddr - GuestMemory.VRAM_BASE).toInt().coerceAtLeast(0)
             val vramPixels = memory.getVramPixels(width, height, fbOffset)
             bitmap.setPixels(vramPixels, 0, width, 0, 0, width, height)

@@ -1,0 +1,21 @@
+--- app/src/main/java/com/example/emulator/Arm64CpuCore.kt
++++ app/src/main/java/com/example/emulator/Arm64CpuCore.kt
+@@ -62,11 +62,17 @@
+     fun executeStep(memory: GuestMemory): HorizonSvcLog? {
+         if (isHalted) return null
+         val opcode = memory.read32(pc)
+         val currentPc = pc
+         pc += 4 // Default next instruction
+         instructionsExecuted++
+-        val decoded = ArmDecoder.decode(opcode, currentPc)
++        var decoded = translationCache[currentPc]
++        if (decoded == null) {
++            decoded = ArmDecoder.decode(opcode, currentPc)
++            if (translationCache.size < 65536) {
++                translationCache[currentPc] = decoded
++            }
++        }
+         lastDisassembly = decoded.disassembly
+         lastSvcLog = decoded.execute(this, memory, currentPc)
+         return lastSvcLog
+     }
