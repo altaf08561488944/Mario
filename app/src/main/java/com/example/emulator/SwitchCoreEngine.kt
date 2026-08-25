@@ -1,5 +1,7 @@
 package com.example.emulator
 
+import com.example.emulator.gpu.FramePacer
+
 import android.graphics.Bitmap
 import com.example.data.entity.VirtualCartridgeEntity
 import kotlinx.coroutines.CoroutineScope
@@ -77,13 +79,21 @@ class SwitchCoreEngine {
     
     // Advanced Virtual Machine Subsystems
     val mmu = com.example.emulator.memory.MemoryManagementUnit() // Advanced Virtual Memory
-    val jitEngine = com.example.emulator.cpu.JitExecutionEngine() // ARM64 IR Translation
+    val jitEngine = com.example.emulator.cpu.JitExecutionEngine(mmu) // ARM64 IR Translation
     val vulkanGpu = com.example.emulator.gpu.VulkanTranslator() // Maxwell to Vulkan Layer
     val horizonOs = com.example.emulator.hle.HorizonServiceManager() // HLE IPC Services
+    
+
     val audioSubsystem = com.example.emulator.audio.AudioSubsystem() // PCM Audio Mixing
+    
+    init {
+        horizonOs.initialize(mmu)
+        audioSubsystem.initialize()
+    }
     val firmwareManager = com.example.emulator.hle.FirmwareManager() // NAND Firmware Manager
     
     private val gpu = TegraGpuEmulator()
+    private val framePacer = FramePacer(60)
 
     fun startEmulation(
         cartridge: VirtualCartridgeEntity,
@@ -241,7 +251,7 @@ class SwitchCoreEngine {
             launch(kotlinx.coroutines.Dispatchers.Main) {
                 var frameCounter = 0L
                 while (engineState.value.isRunning) {
-                    kotlinx.coroutines.delay(16) // ~60 FPS Exact V-Sync Timing
+                    framePacer.paceFrame() // Dynamic Frame Pacing & VSync
                     frameCounter++
 
                     val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }

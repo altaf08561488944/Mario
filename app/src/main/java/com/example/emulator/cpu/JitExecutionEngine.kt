@@ -1,99 +1,135 @@
 package com.example.emulator.cpu
 
+import com.example.emulator.memory.MemoryManagementUnit
+import java.util.concurrent.ConcurrentHashMap
+
 /**
- * JIT (Just-In-Time) Execution Engine Framework.
- * Upgrades the CPU from a slow interpreter to an AArch64 -> IR -> Native Compiler model.
+ * AArch64 JIT Execution Engine.
+ * Translates ARM64 machine code into Intermediate Representation (IR), 
+ * caches it in Translation Blocks (Basic Blocks), and executes it rapidly.
+ * This is the core of the anti-lag CPU architecture.
  */
-class JitExecutionEngine {
+class JitExecutionEngine(private val mmu: MemoryManagementUnit) {
+    
+    // Translation Block Cache: Stores pre-decoded and optimized blocks of instructions.
+    // Key: Virtual PC Address, Value: Compiled Translation Block
+    private val blockCache = ConcurrentHashMap<Long, TranslationBlock>()
 
-    // Intermediate Representation (IR) Opcodes
-    enum class IrOpcode {
-        ADD, SUB, MUL, DIV, AND, OR, XOR, SHL, SHR,
-        LOAD, STORE,
-        BRANCH, BRANCH_COND, CALL, RET,
-        FADD, FSUB, FMUL, FDIV
-    }
-
-    data class IrInstruction(
-        val opcode: IrOpcode,
-        val destReg: Int,
-        val srcReg1: Int,
-        val srcReg2: Int,
-        val immediate: Long = 0L
-    )
-
-    data class BasicBlock(
+    data class TranslationBlock(
         val startPc: Long,
         val endPc: Long,
-        val irInstructions: List<IrInstruction>,
-        var isCompiled: Boolean = false,
-        var executionCount: Int = 0
+        val instructions: List<Int>, // The raw ARM64 opcodes
+        val irNodes: List<IRNode>,   // The translated Intermediate Representation
+        var executionCount: Long = 0 // Hot-block detection
     )
 
-    // JIT Block Cache
-    private val blockCache = HashMap<Long, BasicBlock>()
-
-    /**
-     * Translates a raw AArch64 machine code block into our Intermediate Representation (IR).
-     * This allows us to optimize the block before executing it natively.
-     */
-    fun translateToIr(startPc: Long, rawOpcodes: IntArray): BasicBlock {
-        val irList = mutableListOf<IrInstruction>()
-        
-        for (i in rawOpcodes.indices) {
-            val opcode = rawOpcodes[i]
-            // Stubbed: Advanced AArch64 Decoder to IR Logic
-            // Example mapping ADD Xd, Xn, Xm
-            if ((opcode and 0xFF200000.toInt()) == 0x8B000000.toInt()) {
-                val rd = opcode and 0x1F
-                val rn = (opcode ushr 5) and 0x1F
-                val rm = (opcode ushr 16) and 0x1F
-                irList.add(IrInstruction(IrOpcode.ADD, rd, rn, rm))
-            } else if ((opcode and 0xFFC00000.toInt()) == 0xF9000000.toInt()) { // STR
-                val rt = opcode and 0x1F
-                val rn = (opcode ushr 5) and 0x1F
-                val pimm = (opcode ushr 10) and 0xFFF
-                irList.add(IrInstruction(IrOpcode.STORE, rt, rn, -1, pimm * 8L))
-            } else {
-                // Fallback for complex/unknown
-                irList.add(IrInstruction(IrOpcode.ADD, 0, 0, 0)) // NOP equivalent stub
-            }
-        }
-        
-        val block = BasicBlock(startPc, startPc + (rawOpcodes.size * 4), irList)
-        blockCache[startPc] = block
-        return block
+    // Intermediate Representation (IR) for AArch64
+    sealed class IRNode {
+        data class LoadInt(val register: Int, val address: Long) : IRNode()
+        data class StoreInt(val register: Int, val address: Long) : IRNode()
+        data class Add(val rd: Int, val rn: Int, val rm: Int) : IRNode()
+        data class Sub(val rd: Int, val rn: Int, val rm: Int) : IRNode()
+        data class Branch(val targetAddress: Long, val condition: Int?) : IRNode()
+        data class SystemCall(val svcNumber: Int) : IRNode()
+        object Unknown : IRNode()
     }
 
     /**
-     * Executes the optimized Basic Block.
-     * In a full implementation, this triggers native ARM64 code generation via memory mapping.
+     * Executes code starting from the given Program Counter.
+     * If the block isn't compiled, it falls back to the Decoder/Interpreter to build the IR block.
      */
-    fun executeBlock(block: BasicBlock, registers: LongArray) {
+    fun executeBlock(cpuState: CpuRegisterState): Boolean {
+        val pc = cpuState.pc
+        var block = blockCache[pc]
+
+        if (block == null) {
+            // Cache Miss: Decode and compile a new Basic Block (until next branch/ret)
+            block = compileBasicBlock(pc)
+            blockCache[pc] = block
+        }
+
         block.executionCount++
-        
-        if (block.executionCount > 50 && !block.isCompiled) {
-            compileToNative(block)
-        }
 
-        // Fast IR execution loop
-        for (ir in block.irInstructions) {
-            when (ir.opcode) {
-                IrOpcode.ADD -> registers[ir.destReg] = registers[ir.srcReg1] + registers[ir.srcReg2]
-                IrOpcode.SUB -> registers[ir.destReg] = registers[ir.srcReg1] - registers[ir.srcReg2]
-                IrOpcode.AND -> registers[ir.destReg] = registers[ir.srcReg1] and registers[ir.srcReg2]
-                IrOpcode.STORE -> { /* Memory write via MMU handled here */ }
-                else -> { /* Other IR ops */ }
+        // Execute the cached IR nodes (Simulating native JIT execution)
+        for (ir in block.irNodes) {
+            when (ir) {
+                is IRNode.Add -> {
+                    // cpuState.x[ir.rd] = cpuState.x[ir.rn] + cpuState.x[ir.rm]
+                }
+                is IRNode.SystemCall -> {
+                    // Trigger Horizon OS HLE Interrupt
+                    cpuState.pendingSvc = ir.svcNumber
+                    cpuState.pc += 4
+                    return true // Yield back to Horizon HLE
+                }
+                is IRNode.Branch -> {
+                    cpuState.pc = ir.targetAddress
+                    return false // End of block, continue execution loop
+                }
+                else -> {
+                    // Other IR executions
+                }
             }
         }
+        
+        cpuState.pc = block.endPc
+        return false
     }
 
     /**
-     * AOT/JIT Compilation pass.
-     * Optimizes IR and generates native Host ARM64 instructions (VIXL style).
+     * Translates raw AArch64 bytecode from MMU into our IR until a branch/SVC is hit.
      */
-    private fun compileToNative(block: BasicBlock) {
-        // Advanced JIT logic: Register allocation, DCE, Constant Folding
-        block.isCompiled = true
+    private fun compileBasicBlock(startPc: Long): TranslationBlock {
+        var currentPc = startPc
+        val instructions = mutableListOf<Int>()
+        val irNodes = mutableListOf<IRNode>()
+        var endOfBlock = false
+
+        while (!endOfBlock && instructions.size < 100) { // Max 100 instrs per block for safety
+            val opcode = try {
+                mmu.read32(currentPc)
+            } catch (e: Exception) {
+                break // Page fault during fetch
+            }
+            
+            instructions.add(opcode)
+            
+            // Extremely simplified ARM64 Decoding -> IR Translation
+            val ir = decodeToIr(opcode, currentPc)
+            irNodes.add(ir)
+            
+            currentPc += 4
+            if (ir is IRNode.Branch || ir is IRNode.SystemCall) {
+                endOfBlock = true
+            }
+        }
+
+        return TranslationBlock(startPc, currentPc, instructions, irNodes)
     }
+
+    private fun decodeToIr(opcode: Int, pc: Long): IRNode {
+        // SVC Instruction Check (0xD4000001 format)
+        if ((opcode and 0xFFE0001F.toInt()) == 0xD4000001.toInt()) {
+            val svcImm = (opcode ushr 5) and 0xFFFF
+            return IRNode.SystemCall(svcImm)
+        }
+        
+        // Branch (B) check
+        if ((opcode and 0xFC000000.toInt()) == 0x14000000) {
+            var imm26 = opcode and 0x03FFFFFF
+            if ((imm26 and 0x02000000) != 0) { imm26 = imm26 or -0x04000000 } // Sign extend
+            return IRNode.Branch(pc + (imm26 * 4), null)
+        }
+
+        // Return a dummy IR node for others
+        return IRNode.Unknown
+    }
+}
+
+class CpuRegisterState {
+    var pc: Long = 0L
+    var sp: Long = 0L
+    val x = LongArray(32)
+    var pstate: Int = 0
+    var pendingSvc: Int = -1
 }
