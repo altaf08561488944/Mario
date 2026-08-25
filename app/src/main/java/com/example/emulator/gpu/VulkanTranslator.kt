@@ -11,6 +11,17 @@ class VulkanTranslator {
     var isInitialized = false
         private set
 
+    var resolutionScale: Float = 1.0f
+    var vsyncEnabled: Boolean = true
+    var activeBackend: String = "VULKAN"
+
+    fun applySettings(enableVsync: Boolean, resolutionScale: Float, backend: String) {
+        this.vsyncEnabled = enableVsync
+        this.resolutionScale = resolutionScale
+        this.activeBackend = backend
+        Log.i("VulkanTranslator", "Applied Vulkan Translator Native Engine Settings: vsync=$enableVsync, scale=${resolutionScale}x, backend=$backend")
+    }
+
     // ==========================================
     // JNI NATIVE BINDINGS (Requires C++ Backend)
     // ==========================================

@@ -247,26 +247,37 @@ object NroLoader {
         formatName: String
     ): LoadResult.Success? {
         if (data.size < hfs0Offset + 0x10) return null
+        val magic0 = data[hfs0Offset].toChar()
+        val magic1 = data[hfs0Offset + 1].toChar()
+        val magic2 = data[hfs0Offset + 2].toChar()
+        val magic3 = data[hfs0Offset + 3].toChar()
+        val magic = "$magic0$magic1$magic2$magic3"
+        if (magic != "PFS0" && magic != "HFS0") return null
+
         val numFiles = ByteBuffer.wrap(data, hfs0Offset + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
         val stringTableSize = ByteBuffer.wrap(data, hfs0Offset + 8, 4).order(ByteOrder.LITTLE_ENDIAN).int
 
-        var currentEntryOffset = hfs0Offset + 0x10
-        val dataBaseOffset = currentEntryOffset + (numFiles * 0x40) + stringTableSize
+        val entrySize = if (magic == "HFS0") 0x40 else 0x18
+        val entriesHeaderOff = hfs0Offset + 0x10
+        val stringTableOff = entriesHeaderOff + (numFiles * entrySize)
+        val dataBaseOffset = stringTableOff + stringTableSize
 
         for (i in 0 until numFiles) {
-            if (currentEntryOffset + 0x40 > data.size) break
-            val entryBuffer = ByteBuffer.wrap(data, currentEntryOffset, 0x40).order(ByteOrder.LITTLE_ENDIAN)
+            val entryOff = entriesHeaderOff + (i * entrySize)
+            if (entryOff + entrySize > data.size) break
+
+            val entryBuffer = ByteBuffer.wrap(data, entryOff, entrySize).order(ByteOrder.LITTLE_ENDIAN)
             val fileOffset = entryBuffer.long.toInt()
             val fileSize = entryBuffer.long.toInt()
-
-            currentEntryOffset += 0x40
 
             val absOffset = dataBaseOffset + fileOffset
             if (absOffset + fileSize <= data.size && fileSize > 0x400) {
 
-                // 1. Check if this entry is a nested HFS0 partition (e.g. "secure", "normal")
-                if (data[absOffset] == 'H'.code.toByte() && data[absOffset + 1] == 'F'.code.toByte() &&
-                    data[absOffset + 2] == 'S'.code.toByte() && data[absOffset + 3] == '0'.code.toByte()) {
+                // 1. Check if this entry is a nested HFS0 or PFS0 partition (e.g. "secure", "normal")
+                if ((data[absOffset] == 'H'.code.toByte() || data[absOffset] == 'P'.code.toByte()) &&
+                    data[absOffset + 1] == 'F'.code.toByte() &&
+                    data[absOffset + 2] == 'S'.code.toByte() &&
+                    data[absOffset + 3] == '0'.code.toByte()) {
                     val nestedResult = parseHfs0ForNcaExeFs(data, absOffset, memory, cpu, containerName, formatName)
                     if (nestedResult != null) return nestedResult
                 }
@@ -435,7 +446,7 @@ object NroLoader {
 
                 val exeFsFiles = NcaHeaderParser.parseExeFsSection(sectionBytes, section.copy(startByteOffset = 0))
                 for (exeFile in exeFsFiles) {
-                    if (exeFile.name == "main" || exeFile.name == "main.nso" || exeFile.name == "main.nro" || exeFile.name == "rtld") {
+                    if (exeFile.name == "main" || exeFile.name == "main.nso" || exeFile.name == "main.nro" || exeFile.name == "rtld" || exeFile.name.endsWith(".nso") || exeFile.name.endsWith(".nro")) {
                         val exeAbsOff = exeFile.absoluteDataOffset.toInt()
                         if (exeAbsOff + exeFile.sizeBytes <= sectionBytes.size) {
                             val nsoHeader = parseNsoHeader(sectionBytes, exeAbsOff)
@@ -447,6 +458,39 @@ object NroLoader {
                                 return loadNroSegments(sectionBytes, exeAbsOff, nroHeader, memory, cpu, exeFile.name, formatName)
                             }
                         }
+                    }
+                }
+
+                // Fallback 1: check all files in ExeFS partition
+                for (exeFile in exeFsFiles) {
+                    val exeAbsOff = exeFile.absoluteDataOffset.toInt()
+                    if (exeAbsOff + 0x40 <= sectionBytes.size) {
+                        val nsoHeader = parseNsoHeader(sectionBytes, exeAbsOff)
+                        if (nsoHeader.isNso) {
+                            return loadNsoSegments(sectionBytes, exeAbsOff, nsoHeader, memory, cpu, exeFile.name, formatName)
+                        }
+                        val nroHeader = parseNroHeader(sectionBytes, exeAbsOff)
+                        if (nroHeader.isNro) {
+                            return loadNroSegments(sectionBytes, exeAbsOff, nroHeader, memory, cpu, exeFile.name, formatName)
+                        }
+                    }
+                }
+
+                // Fallback 2: Scan sectionBytes for embedded NSO0/NRO0 headers
+                val nsoOffset = findMagicOffset(sectionBytes, "NSO0")
+                if (nsoOffset >= 0) {
+                    val nsoHeader = parseNsoHeader(sectionBytes, nsoOffset)
+                    if (nsoHeader.isNso) {
+                        return loadNsoSegments(sectionBytes, nsoOffset, nsoHeader, memory, cpu, "main.nso", formatName)
+                    }
+                }
+
+                val nroOffset = findMagicOffset(sectionBytes, "NRO0")
+                if (nroOffset >= 0x10) {
+                    val baseOff = nroOffset - 0x10
+                    val nroHeader = parseNroHeader(sectionBytes, baseOff)
+                    if (nroHeader.isNro) {
+                        return loadNroSegments(sectionBytes, baseOff, nroHeader, memory, cpu, "main.nro", formatName)
                     }
                 }
             }

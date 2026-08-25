@@ -223,28 +223,19 @@ object KeyManager {
             )
         }
 
-        // 7. HMAC-SHA256 Signature Validation
-        // Checks signature block in NCA Header (0x000..0x200) against calculated HMAC
-        if (workingBaseOffset + 0x400 <= workingBuffer.size) {
-            val headerSectionTable = workingBuffer.copyOfRange(workingBaseOffset + 0x200, workingBaseOffset + 0x400)
-            val expectedSig = workingBuffer.copyOfRange(workingBaseOffset, workingBaseOffset + 0x100)
-
-            val hasNonZeroExpectedSig = expectedSig.any { it != 0.toByte() }
-            if (hasNonZeroExpectedSig) {
-                val isSigValid = verifyHmacSignature(candidateKey, headerSectionTable, expectedSig, compareLength = 16)
-                if (!isSigValid) {
-                    // Also check if signature matches with masterKey
-                    val isMasterSigValid = verifyHmacSignature(masterKey, headerSectionTable, expectedSig, compareLength = 16)
-                    if (!isMasterSigValid) {
-                        // Strict HMAC verification warning / rejection for incorrect keys
-                        return KeyValidationResult.Invalid(
-                            errorCode = KeyErrorCode.HMAC_SIGNATURE_MISMATCH,
-                            message = "Derived NCA Content Key failed HMAC signature validation. The provided prod.keys does not match this cartridge.",
-                            isIncorrectKey = true,
-                            suggestedAction = "Verify that your prod.keys corresponds to the same console/firmware as this game dump."
-                        )
-                    }
-                }
+        // 7. Validate Header Magic Integrity ("NCA3" / "NCA2")
+        if (workingBaseOffset + 0x204 <= workingBuffer.size) {
+            val m0 = workingBuffer[workingBaseOffset + 0x200].toInt() and 0xFF
+            val m1 = workingBuffer[workingBaseOffset + 0x201].toInt() and 0xFF
+            val m2 = workingBuffer[workingBaseOffset + 0x202].toInt() and 0xFF
+            val m3 = workingBuffer[workingBaseOffset + 0x203].toInt() and 0xFF
+            val magic = "${m0.toChar()}${m1.toChar()}${m2.toChar()}${m3.toChar()}"
+            if (magic != "NCA3" && magic != "NCA2") {
+                return KeyValidationResult.Invalid(
+                    errorCode = KeyErrorCode.DECRYPTION_FAILED,
+                    message = "NCA Header magic verification failed (expected NCA3/NCA2, got '$magic'). Header decryption key may be invalid.",
+                    isIncorrectKey = true
+                )
             }
         }
 
@@ -323,39 +314,6 @@ object KeyManager {
                 message = "NCA Header decryption failed: Decrypted block does not contain valid NCA magic (got '$magic' at offset 0x200). The provided header_key is incorrect or corrupted.",
                 errorCode = KeyErrorCode.DECRYPTION_FAILED
             )
-        }
-
-        // Formal HMAC-SHA256 signature verification check:
-        // NCA Header layout:
-        // 0x000..0x100: Header Signature 1 (RSA-PSS or HMAC-SHA256)
-        // 0x100..0x200: Header Signature 2
-        // 0x200..0x400: Header Body / Section Table (0x200 bytes)
-        val sig1 = decryptedHeader.copyOfRange(0, 0x100)
-        val sig2 = decryptedHeader.copyOfRange(0x100, 0x200)
-        val headerBody = decryptedHeader.copyOfRange(0x200, 0x400)
-
-        val hasNonZeroSig1 = sig1.any { it != 0.toByte() }
-        val hasNonZeroSig2 = sig2.any { it != 0.toByte() }
-
-        if (hasNonZeroSig1 || hasNonZeroSig2) {
-            // Check HMAC-SHA256 verification against key1, key2, or full headerKey
-            val matchesSig1 = verifyHmacSignature(key1, headerBody, sig1, compareLength = 16) ||
-                verifyHmacSignature(key2, headerBody, sig1, compareLength = 16) ||
-                verifyHmacSignature(headerKey, headerBody, sig1, compareLength = 16)
-
-            val matchesSig2 = verifyHmacSignature(key1, headerBody, sig2, compareLength = 16) ||
-                verifyHmacSignature(key2, headerBody, sig2, compareLength = 16) ||
-                verifyHmacSignature(headerKey, headerBody, sig2, compareLength = 16)
-
-            val allSameByte1 = sig1.all { it == sig1[0] } && sig1[0] != 0.toByte()
-            val allSameByte2 = sig2.all { it == sig2[0] } && sig2[0] != 0.toByte()
-
-            if (allSameByte1 || allSameByte2) {
-                throw DecryptionException(
-                    message = "NCA Header signature block contains invalid repeated pattern. Signature validation failed.",
-                    errorCode = KeyErrorCode.HMAC_SIGNATURE_MISMATCH
-                )
-            }
         }
 
         return decryptedHeader

@@ -1,7 +1,9 @@
 package com.example.ui.screens
 
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -21,20 +23,22 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -54,10 +58,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.entity.BootConfigEntity
 import com.example.ui.theme.NeonBlue
 import com.example.ui.theme.NeonGreen
-import com.example.ui.theme.NeonYellow
 import com.example.ui.theme.SurfaceBorder
 import com.example.ui.theme.SurfaceDark
 import com.example.ui.theme.SurfaceVariantDark
+import com.example.viewmodel.ConversionProgress
 
 data class WebBookmark(
     val title: String,
@@ -66,7 +70,9 @@ data class WebBookmark(
 
 @Composable
 fun WebEnvironmentScreen(
-    bootConfig: BootConfigEntity?
+    bootConfig: BootConfigEntity?,
+    conversionState: ConversionProgress = ConversionProgress(),
+    onDownloadRequested: (url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) -> Unit = { _, _, _, _ -> }
 ) {
     val dnsText = if (bootConfig?.dnsMode == "GOOGLE_DNS") "Google DNS (8.8.8.8)" else "Custom DNS (${bootConfig?.customDns ?: "8.8.8.8"})"
 
@@ -116,17 +122,48 @@ fun WebEnvironmentScreen(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Text(
-                            text = "WEB ENVIRONMENT",
+                            text = "WEB ENVIRONMENT & BROWSER",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                         Text(
-                            text = "DNS Active: $dnsText",
+                            text = "DNS Active: $dnsText • Downloads -> Virtual Storage (MyFolder)",
                             style = MaterialTheme.typography.labelSmall,
                             color = NeonGreen
                         )
                     }
+                }
+            }
+        }
+
+        // Download Progress Card
+        AnimatedVisibility(visible = conversionState.isConverting) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                border = CardDefaults.outlinedCardBorder()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Download, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = conversionState.statusText,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { conversionState.progress },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = NeonGreen,
+                        trackColor = Color.DarkGray
+                    )
                 }
             }
         }
@@ -201,6 +238,22 @@ fun WebEnvironmentScreen(
             ) {
                 Icon(Icons.Default.ArrowForward, contentDescription = "Go", tint = Color.Black)
             }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Button(
+                onClick = {
+                    val formatted = if (!inputUrl.startsWith("http://") && !inputUrl.startsWith("https://")) {
+                        "https://$inputUrl"
+                    } else inputUrl
+                    onDownloadRequested(formatted, null, null, null)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.testTag("download_direct_button")
+            ) {
+                Icon(Icons.Default.Download, contentDescription = "Download Direct", tint = Color.Black, modifier = Modifier.size(18.dp))
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -217,9 +270,28 @@ fun WebEnvironmentScreen(
             AndroidView(
                 factory = { ctx ->
                     WebView(ctx).apply {
-                        webViewClient = WebViewClient()
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+
+                        setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                            onDownloadRequested(url, userAgent, contentDisposition, mimetype)
+                        }
+
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                val url = request?.url?.toString() ?: return false
+                                val lowerUrl = url.lowercase()
+                                if (lowerUrl.endsWith(".nsp") || lowerUrl.endsWith(".xci") ||
+                                    lowerUrl.endsWith(".keys") || lowerUrl.endsWith(".zip") ||
+                                    lowerUrl.endsWith(".nro") || lowerUrl.endsWith(".nso") ||
+                                    lowerUrl.endsWith(".bin")) {
+                                    onDownloadRequested(url, null, null, null)
+                                    return true
+                                }
+                                return false
+                            }
+                        }
+
                         loadUrl(currentUrl)
                         webViewInstance = this
                     }
@@ -232,3 +304,4 @@ fun WebEnvironmentScreen(
         }
     }
 }
+

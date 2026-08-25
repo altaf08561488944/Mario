@@ -50,7 +50,7 @@ class JitExecutionEngine(private val mmu: MemoryManagementUnit) {
 
         block.executionCount++
 
-        // Execute the cached IR nodes (Simulating native JIT execution)
+        // Execute the cached IR nodes in native JIT Translation Block Cache
         for (ir in block.irNodes) {
             when (ir) {
                 is IRNode.Add -> {

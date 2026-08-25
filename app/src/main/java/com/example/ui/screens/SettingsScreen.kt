@@ -19,16 +19,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.entity.BootConfigEntity
 import com.example.emulator.SwitchKeysManager
+import com.example.emulator.settings.AnisotropicFiltering
 import com.example.emulator.settings.AudioBackend
 import com.example.emulator.settings.CpuAccuracy
 import com.example.emulator.settings.EmulatorSettings
+import com.example.emulator.settings.GraphicsBackend
 import com.example.ui.theme.NeonBlue
 import com.example.ui.theme.NeonGreen
 import com.example.ui.theme.NeonRed
 import com.example.ui.theme.SurfaceDark
 import com.example.ui.theme.SurfaceVariantDark
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     settings: EmulatorSettings,
@@ -37,6 +39,7 @@ fun SettingsScreen(
     onImportFirmwareUri: (Uri) -> Unit = {},
     onQuickLoadVerifiedKeys: () -> Unit = {},
     onQuickLoadVerifiedFirmware: () -> Unit = {},
+    onRunDiagnostics: () -> Unit = {},
     onSettingsChanged: (EmulatorSettings) -> Unit
 ) {
     var currentSettings by remember(settings) { mutableStateOf(settings) }
@@ -64,7 +67,7 @@ fun SettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Emulator & Horizon OS Settings", color = Color.White) },
+                title = { Text("Emulator & Native Engine Settings", color = Color.White) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = SurfaceDark)
             )
         },
@@ -196,47 +199,216 @@ fun SettingsScreen(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Button(
+                    onClick = onRunDiagnostics,
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonBlue),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.Black)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Run System Verification Diagnostics", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
             }
 
-            // GRAPHICS SECTION
+            // GRAPHICS & HARDWARE ENGINE
             item {
-                SettingsSectionHeader("Graphics & Display", Icons.Default.DesktopWindows)
+                SettingsSectionHeader("Graphics & Hardware Pipeline", Icons.Default.DesktopWindows)
                 
-                SettingsSlider(
-                    title = "Target FPS (Frame Pacing)",
-                    description = "Locks the emulator speed to a specific framerate to prevent stuttering. (Recommended: 34 - 60)",
-                    value = currentSettings.targetFps.toFloat(),
-                    valueRange = 15f..60f,
-                    steps = 44, // 60 - 15 - 1
-                    onValueChange = { updateAndSave { copy(targetFps = it.toInt()) } },
-                    valueText = "${currentSettings.targetFps} FPS"
+                // 1. Resolution Scaling
+                Text(
+                    text = "Resolution Scaling",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = "Controls rendering resolution of the Maxwell GPU pipeline. Lower values improve performance; higher values increase sharpness.",
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
 
+                val scales = listOf(
+                    0.5f to "0.5x",
+                    0.75f to "0.75x",
+                    1.0f to "1.0x (720p/1080p)",
+                    1.25f to "1.25x",
+                    1.5f to "1.5x (2K)",
+                    2.0f to "2.0x (4K UHD)"
+                )
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    scales.forEach { (scale, label) ->
+                        FilterChip(
+                            selected = currentSettings.resolutionScale == scale,
+                            onClick = { updateAndSave { copy(resolutionScale = scale) } },
+                            label = { Text(label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = NeonRed,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 2. Frame Skip Toggle
+                Text(
+                    text = "Frame Skip Engine",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = "Skips rendering graphics frames when CPU/GPU load is high to maintain game speed.",
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                val frameSkipOptions = listOf(
+                    0 to "Off (0)",
+                    1 to "1 Frame",
+                    2 to "2 Frames",
+                    3 to "3 Frames",
+                    -1 to "Auto Skip"
+                )
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    frameSkipOptions.forEach { (skipVal, label) ->
+                        FilterChip(
+                            selected = currentSettings.frameSkip == skipVal,
+                            onClick = { updateAndSave { copy(frameSkip = skipVal) } },
+                            label = { Text(label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = NeonRed,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 3. VSync Switch
                 SettingsSwitch(
                     title = "Enable V-Sync",
-                    description = "Synchronizes guest frames with host refresh rate to prevent screen tearing.",
+                    description = "Synchronizes guest frames with host display refresh rate to eliminate screen tearing.",
                     checked = currentSettings.enableVsync,
                     onCheckedChange = { updateAndSave { copy(enableVsync = it) } }
                 )
 
+                // 4. Docked Mode Switch
                 SettingsSwitch(
                     title = "Docked Mode",
-                    description = "Emulates the console in Docked mode (1080p profile) instead of Handheld (720p).",
+                    description = "Emulates console in Docked mode (1080p profile) instead of Handheld mode (720p profile).",
                     checked = currentSettings.isDockedMode,
                     onCheckedChange = { updateAndSave { copy(isDockedMode = it) } }
                 )
 
+                // 5. Target FPS Slider
+                SettingsSlider(
+                    title = "Target FPS (Frame Pacing)",
+                    description = "Locks native engine pacing to target framerate (15 - 60 FPS).",
+                    value = currentSettings.targetFps.toFloat(),
+                    valueRange = 15f..60f,
+                    steps = 44,
+                    onValueChange = { updateAndSave { copy(targetFps = it.toInt()) } },
+                    valueText = "${currentSettings.targetFps} FPS"
+                )
+
+                // 6. Graphics Backend Selection
+                Text(
+                    text = "Graphics API Backend",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Text(
+                    text = "Selects the native hardware rendering pipeline.",
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GraphicsBackend.entries.forEach { backend ->
+                        FilterChip(
+                            selected = currentSettings.graphicsBackend == backend,
+                            onClick = { updateAndSave { copy(graphicsBackend = backend) } },
+                            label = { Text(backend.label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = NeonRed,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 7. Asynchronous Shaders Switch
                 SettingsSwitch(
-                    title = "Asynchronous Shaders",
-                    description = "Compiles shaders in the background to heavily reduce micro-stuttering during gameplay.",
+                    title = "Asynchronous Shader Compilation",
+                    description = "Compiles NVN/SPIR-V shaders on background worker threads to reduce stuttering.",
                     checked = currentSettings.asynchronousShaders,
                     onCheckedChange = { updateAndSave { copy(asynchronousShaders = it) } }
                 )
+
+                // 8. Disk Shader Cache Switch
+                SettingsSwitch(
+                    title = "Disk Shader Cache",
+                    description = "Stores compiled SPIR-V pipelines on device storage for instant game loading.",
+                    checked = currentSettings.diskShaderCache,
+                    onCheckedChange = { updateAndSave { copy(diskShaderCache = it) } }
+                )
+
+                // 9. Anisotropic Filtering
+                Text(
+                    text = "Anisotropic Texture Filtering",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Text(
+                    text = "Sharpens 3D surface textures when viewed at sharp angles.",
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AnisotropicFiltering.entries.forEach { filter ->
+                        FilterChip(
+                            selected = currentSettings.anisotropicFiltering == filter,
+                            onClick = { updateAndSave { copy(anisotropicFiltering = filter) } },
+                            label = { Text(filter.label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = NeonRed,
+                                selectedLabelColor = Color.White
+                            )
+                        )
+                    }
+                }
             }
 
-            // CPU SECTION
+            // CPU & JIT SECTION
             item {
-                SettingsSectionHeader("CPU & JIT Engine", Icons.Default.Memory)
+                SettingsSectionHeader("CPU & ARM64 JIT Engine", Icons.Default.Memory)
                 
                 Text(
                     text = "CPU Accuracy Mode",
@@ -245,18 +417,22 @@ fun SettingsScreen(
                     fontSize = 16.sp
                 )
                 Text(
-                    text = "Lower accuracy speeds up emulation but may cause game glitches.",
+                    text = "Lower accuracy speeds up emulation but may cause timing glitches in complex titles.",
                     color = Color.Gray,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     CpuAccuracy.entries.forEach { accuracy ->
                         FilterChip(
                             selected = currentSettings.cpuAccuracy == accuracy,
                             onClick = { updateAndSave { copy(cpuAccuracy = accuracy) } },
-                            label = { Text(accuracy.name) },
+                            label = { Text("${accuracy.label} (${accuracy.name})", fontSize = 12.sp) },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = NeonRed,
                                 selectedLabelColor = Color.White
@@ -271,7 +447,7 @@ fun SettingsScreen(
                 SettingsSectionHeader("Audio Subsystem", Icons.Default.Speaker)
                 
                 Text(
-                    text = "Audio Backend",
+                    text = "Audio Backend Driver",
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp
@@ -282,13 +458,30 @@ fun SettingsScreen(
                         FilterChip(
                             selected = currentSettings.audioBackend == backend,
                             onClick = { updateAndSave { copy(audioBackend = backend) } },
-                            label = { Text(backend.name) },
+                            label = { Text(backend.label, fontSize = 12.sp) },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = NeonRed,
                                 selectedLabelColor = Color.White
                             )
                         )
                     }
+                }
+            }
+
+            // RESET DEFAULTS
+            item {
+                OutlinedButton(
+                    onClick = {
+                        val defaultSettings = EmulatorSettings()
+                        currentSettings = defaultSettings
+                        onSettingsChanged(defaultSettings)
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonRed)
+                ) {
+                    Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Reset All Settings to Native Engine Defaults")
                 }
             }
         }
@@ -302,7 +495,7 @@ fun SettingsSectionHeader(title: String, icon: androidx.compose.ui.graphics.vect
         Spacer(modifier = Modifier.width(8.dp))
         Text(text = title, color = NeonRed, fontWeight = FontWeight.Bold, fontSize = 18.sp)
     }
-    Divider(color = SurfaceDark, thickness = 2.dp, modifier = Modifier.padding(bottom = 16.dp))
+    HorizontalDivider(color = SurfaceDark, thickness = 2.dp, modifier = Modifier.padding(bottom = 16.dp))
 }
 
 @Composable
@@ -353,4 +546,3 @@ fun SettingsSlider(
         )
     }
 }
-

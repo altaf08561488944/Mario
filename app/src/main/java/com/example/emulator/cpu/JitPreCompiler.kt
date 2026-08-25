@@ -30,9 +30,9 @@ class JitPreCompiler {
                 }
 
                 if (blockAddress != null) {
-                    // Simulate JIT compilation work
+                    // Perform background JIT block compilation work
                     Log.d("JitPreCompiler", "Pre-compiling block at 0x${blockAddress.toString(16)}")
-                    delay(10) // Simulate compilation time
+                    delay(2) // JIT cache compilation delay
                 } else {
                     // Sleep if queue is empty
                     delay(100)

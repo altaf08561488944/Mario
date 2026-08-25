@@ -24,6 +24,21 @@ class TegraGpuEmulator {
     var vulkanPipelineBound: String = "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK"
     var frameTimeMs: Float = 16.6f
 
+    var resolutionScale: Float = 1.0f
+    var asynchronousShadersEnabled: Boolean = true
+    var anisotropicFilteringLevel: Int = 4
+
+    fun applySettings(
+        resolutionScale: Float,
+        isDocked: Boolean,
+        asynchronousShaders: Boolean,
+        anisotropicFiltering: Int
+    ) {
+        this.resolutionScale = resolutionScale
+        this.asynchronousShadersEnabled = asynchronousShaders
+        this.anisotropicFilteringLevel = anisotropicFiltering
+    }
+
     /**
      * Performs display validation using VRAMController memory-mapped registers and state structures.
      */

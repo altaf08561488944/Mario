@@ -82,6 +82,7 @@ fun BootSetupScreen(
     onImportFirmwareUri: (Uri) -> Unit = {},
     onQuickLoadVerifiedKeys: () -> Unit = {},
     onQuickLoadVerifiedFirmware: () -> Unit = {},
+    onRunDiagnostics: () -> Unit = {},
     onSelectBios: (String, String) -> Unit,
     onSelectFirmware: (String, String) -> Unit,
     onUpdateDns: (String, String) -> Unit,
@@ -409,6 +410,19 @@ fun BootSetupScreen(
                     }
                 }
             }
+        }
+
+        OutlinedButton(
+            onClick = onRunDiagnostics,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp)
+                .testTag("run_diagnostics_button"),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonBlue)
+        ) {
+            Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Run Key & Firmware Diagnostic Tool", fontWeight = FontWeight.Bold)
         }
 
         // 3. SELECT WEB ENVIRONMENT CARD

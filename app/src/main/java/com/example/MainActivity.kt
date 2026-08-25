@@ -32,6 +32,7 @@ import com.example.ui.screens.SaveStatesScreen
 import com.example.ui.screens.VirtualStorageScreen
 import com.example.ui.screens.WebEnvironmentScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.components.DiagnosticToolDialog
 import com.example.emulator.settings.EmulatorSettingsManager
 import com.example.ui.theme.SwtcNoosTheme
 import com.example.viewmodel.SwtcTab
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
                 val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
                 val coreState by viewModel.coreEngineState.collectAsStateWithLifecycle()
                 val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
+                val diagnosticReport by viewModel.diagnosticReport.collectAsStateWithLifecycle()
 
                 val snackbarHostState = remember { SnackbarHostState() }
 
@@ -114,6 +116,7 @@ class MainActivity : ComponentActivity() {
                                         onImportFirmwareUri = { uri -> viewModel.importFirmwareFromUri(uri) },
                                         onQuickLoadVerifiedKeys = { viewModel.quickLoad100PercentKeys() },
                                         onQuickLoadVerifiedFirmware = { viewModel.quickLoad100PercentFirmware() },
+                                        onRunDiagnostics = { viewModel.runDiagnostics() },
                                         onSelectBios = { name, path -> viewModel.selectBiosFile(name, path) },
                                         onSelectFirmware = { name, path -> viewModel.selectFirmwareFile(name, path) },
                                         onUpdateDns = { mode, customDns -> viewModel.updateDnsSetting(mode, customDns) },
@@ -167,7 +170,11 @@ class MainActivity : ComponentActivity() {
                                     )
 
                                     SwtcTab.WEB_ENVIRONMENT -> WebEnvironmentScreen(
-                                        bootConfig = bootConfig
+                                        bootConfig = bootConfig,
+                                        conversionState = conversionState,
+                                        onDownloadRequested = { url, userAgent, contentDisposition, mimeType ->
+                                            viewModel.downloadFileToVirtualStorage(url, userAgent, contentDisposition, mimeType)
+                                        }
                                     )
 
                                     SwtcTab.HARDWARE_MONITOR -> HardwareMonitorScreen(
@@ -184,10 +191,22 @@ class MainActivity : ComponentActivity() {
                                         onImportFirmwareUri = { uri -> viewModel.importFirmwareFromUri(uri) },
                                         onQuickLoadVerifiedKeys = { viewModel.quickLoad100PercentKeys() },
                                         onQuickLoadVerifiedFirmware = { viewModel.quickLoad100PercentFirmware() },
-                                        onSettingsChanged = { newSettings -> settingsManager.updateSettings(newSettings) }
+                                        onSettingsChanged = { newSettings ->
+                                            settingsManager.updateSettings(newSettings)
+                                            viewModel.updateCoreSettings(newSettings)
+                                        }
                                     )
+
                                 }
                             }
+
+                            DiagnosticToolDialog(
+                                report = diagnosticReport,
+                                onDismiss = { viewModel.clearDiagnostics() },
+                                onRunDiagnostics = { viewModel.runDiagnostics() },
+                                onQuickFixKeys = { viewModel.quickLoad100PercentKeys() },
+                                onQuickFixFirmware = { viewModel.quickLoad100PercentFirmware() }
+                            )
                         }
                     }
                 }
