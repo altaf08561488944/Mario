@@ -140,7 +140,7 @@ fun CartridgeLibraryScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Go to 'My Folder', select a game file (.nsp, .xci, or .sup) and choose 'CONVERT TO CARTRIDGE' to build a virtual cartridge for the emulator.",
+                        text = "Go to 'My Folder', select a game file (.nsp or .nro) and choose 'CONVERT TO CARTRIDGE' to build a virtual cartridge.\n\nNote: .xci commercial format support is Coming Soon!",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -242,12 +242,12 @@ private fun CartridgeCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
                         shape = RoundedCornerShape(4.dp),
-                        color = NeonYellow.copy(alpha = 0.2f)
+                        color = if (cartridge.sourceFormat.contains("XCI", ignoreCase = true)) NeonRed.copy(alpha = 0.2f) else NeonYellow.copy(alpha = 0.2f)
                     ) {
                         Text(
-                            text = "VIRTUAL CARTRIDGE (${cartridge.sourceFormat})",
+                            text = if (cartridge.sourceFormat.contains("XCI", ignoreCase = true)) "XCI (COMING SOON)" else "VIRTUAL CARTRIDGE (${cartridge.sourceFormat})",
                             style = MaterialTheme.typography.labelSmall,
-                            color = NeonYellow,
+                            color = if (cartridge.sourceFormat.contains("XCI", ignoreCase = true)) NeonRed else NeonYellow,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
@@ -260,15 +260,26 @@ private fun CartridgeCard(
                     )
                 }
 
-                Button(
-                    onClick = onLaunch,
-                    colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black),
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier.testTag("launch_cartridge_${cartridge.id}")
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("PLAY / LAUNCH", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                if (cartridge.sourceFormat.contains("XCI", ignoreCase = true)) {
+                    Button(
+                        onClick = { /* Disabled for now */ },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Gray, contentColor = Color.White),
+                        shape = RoundedCornerShape(20.dp),
+                        enabled = false
+                    ) {
+                        Text("COMING SOON", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                    }
+                } else {
+                    Button(
+                        onClick = onLaunch,
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black),
+                        shape = RoundedCornerShape(20.dp),
+                        modifier = Modifier.testTag("launch_cartridge_${cartridge.id}")
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("PLAY / LAUNCH", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                    }
                 }
             }
         }

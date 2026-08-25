@@ -74,6 +74,15 @@ class SwitchCoreEngine {
     // Genuine Emulator Hardware Subsystems
     private val memory = GuestMemory()
     private val cpuCores = Array(4) { id -> Arm64CpuCore(id) }
+    
+    // Advanced Virtual Machine Subsystems
+    val mmu = com.example.emulator.memory.MemoryManagementUnit() // Advanced Virtual Memory
+    val jitEngine = com.example.emulator.cpu.JitExecutionEngine() // ARM64 IR Translation
+    val vulkanGpu = com.example.emulator.gpu.VulkanTranslator() // Maxwell to Vulkan Layer
+    val horizonOs = com.example.emulator.hle.HorizonServiceManager() // HLE IPC Services
+    val audioSubsystem = com.example.emulator.audio.AudioSubsystem() // PCM Audio Mixing
+    val firmwareManager = com.example.emulator.hle.FirmwareManager() // NAND Firmware Manager
+    
     private val gpu = TegraGpuEmulator()
 
     fun startEmulation(
