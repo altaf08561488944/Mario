@@ -137,6 +137,23 @@ class GuestMemory {
         return pixels
     }
 
+    // Checks if the active VRAM region contains rendered pixels
+    fun hasNonZeroVramData(width: Int = 1280, height: Int = 720, framebufferOffset: Int = 0): Boolean {
+        val copyBuffer = vramBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        val validOffset = framebufferOffset.coerceIn(0, (VRAM_SIZE - 4096).coerceAtLeast(0))
+        copyBuffer.position(validOffset)
+        val checkLimit = (width * height).coerceAtMost(1024)
+        for (i in 0 until checkLimit) {
+            if (copyBuffer.remaining() >= 4) {
+                val pixel = copyBuffer.int
+                if (pixel != 0 && pixel != 0xFF000000.toInt()) {
+                    return true
+                }
+            } else break
+        }
+        return false
+    }
+
     // Address translation helper
     private fun resolveAddress(addr: Long): Pair<ByteBuffer, Int>? {
         return when {

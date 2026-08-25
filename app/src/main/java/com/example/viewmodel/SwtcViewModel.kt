@@ -60,6 +60,7 @@ data class ActiveEmulationSession(
 class SwtcViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: SwtcRepository
+    private val secureKeysManager = com.example.emulator.SecureKeysManager(application)
     
     val bootConfig: StateFlow<BootConfigEntity?>
     val cartridges: StateFlow<List<VirtualCartridgeEntity>>
@@ -506,6 +507,13 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
     val coreEngineState: StateFlow<com.example.emulator.SwitchCoreState> = switchCoreEngine.engineState
 
     fun launchCartridge(cartridge: VirtualCartridgeEntity) {
+        // Pre-Emulation Security & Key Verification Gatekeeper
+        val keyStatus = secureKeysManager.verifySystemKeysBeforeEmulation()
+        if (!keyStatus.isReadyForEmulation) {
+            showUserMessage("❌ Key Error: ${keyStatus.diagnosticMessage}")
+            return
+        }
+
         val emulators = installedEmulators.value.filter { it.isInstalled }
         if (emulators.isNotEmpty()) {
             val target = emulators.first()
@@ -520,11 +528,17 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
                 sourceFormat = cartridge.sourceFormat,
                 fps = 60
             )
-            showUserMessage("Started SWTC Core Engine for ${cartridge.title}")
+            showUserMessage("Started SWTC Core Engine for ${cartridge.title} (${keyStatus.totalKeysFound} keys verified)")
         }
     }
 
     fun launchCartridgeDirectInternal(cartridge: VirtualCartridgeEntity) {
+        val keyStatus = secureKeysManager.verifySystemKeysBeforeEmulation()
+        if (!keyStatus.isReadyForEmulation) {
+            showUserMessage("❌ Key Error: ${keyStatus.diagnosticMessage}")
+            return
+        }
+
         switchCoreEngine.startEmulation(cartridge, isDocked = true)
         _activeSession.value = ActiveEmulationSession(
             isRunning = true,
@@ -533,7 +547,7 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
             sourceFormat = cartridge.sourceFormat,
             fps = 60
         )
-        showUserMessage("Started SWTC Core Engine for ${cartridge.title}")
+        showUserMessage("Started SWTC Core Engine for ${cartridge.title} (${keyStatus.totalKeysFound} keys verified)")
     }
 
     fun runDevCpuSelfTest() {
@@ -550,6 +564,14 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateCoreSettings(targetFps: Int) {
         switchCoreEngine.applySettings(targetFps)
+    }
+
+    fun onControllerJoystick(x: Float, y: Float) {
+        switchCoreEngine.controllerInput.setJoystick(x, y)
+    }
+
+    fun onControllerButton(button: com.example.emulator.input.SwitchButton, pressed: Boolean) {
+        switchCoreEngine.controllerInput.setButton(button, pressed)
     }
 
     fun toggleDockedMode() {

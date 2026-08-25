@@ -82,7 +82,9 @@ class MainActivity : ComponentActivity() {
                         onToggleDocked = { viewModel.toggleDockedMode() },
                         onStopEmulation = { viewModel.stopEmulationSession() },
                         onQuickSave = { viewModel.quickSaveCurrentEmulation() },
-                        onRunDevSelfTest = { viewModel.runDevCpuSelfTest() }
+                        onRunDevSelfTest = { viewModel.runDevCpuSelfTest() },
+                        onJoystick = { x, y -> viewModel.onControllerJoystick(x, y) },
+                        onButton = { btn, pressed -> viewModel.onControllerButton(btn, pressed) }
                     )
                 } else {
                     Scaffold(
