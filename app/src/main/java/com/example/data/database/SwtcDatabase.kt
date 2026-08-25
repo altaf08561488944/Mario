@@ -7,15 +7,17 @@ import androidx.room.RoomDatabase
 import com.example.data.dao.SwtcDao
 import com.example.data.entity.BootConfigEntity
 import com.example.data.entity.MyFolderFileEntity
+import com.example.data.entity.SaveStateEntity
 import com.example.data.entity.VirtualCartridgeEntity
 
 @Database(
     entities = [
         BootConfigEntity::class,
         VirtualCartridgeEntity::class,
-        MyFolderFileEntity::class
+        MyFolderFileEntity::class,
+        SaveStateEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class SwtcDatabase : RoomDatabase() {
@@ -32,7 +34,9 @@ abstract class SwtcDatabase : RoomDatabase() {
                     context.applicationContext,
                     SwtcDatabase::class.java,
                     "swtc_noos_database"
-                ).build()
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = instance
                 instance
             }

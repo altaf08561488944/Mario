@@ -28,8 +28,11 @@ import com.example.ui.screens.BootSetupScreen
 import com.example.ui.screens.CartridgeLibraryScreen
 import com.example.ui.screens.HardwareMonitorScreen
 import com.example.ui.screens.MyFolderScreen
+import com.example.ui.screens.SaveStatesScreen
 import com.example.ui.screens.VirtualStorageScreen
 import com.example.ui.screens.WebEnvironmentScreen
+import com.example.ui.screens.SettingsScreen
+import com.example.emulator.settings.EmulatorSettingsManager
 import com.example.ui.theme.SwtcNoosTheme
 import com.example.viewmodel.SwtcTab
 import com.example.viewmodel.SwtcViewModel
@@ -37,17 +40,21 @@ import com.example.viewmodel.SwtcViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: SwtcViewModel by viewModels()
+    private lateinit var settingsManager: EmulatorSettingsManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        settingsManager = EmulatorSettingsManager(this)
         setContent {
             SwtcNoosTheme {
                 val selectedTab by viewModel.selectedTab.collectAsStateWithLifecycle()
+                val currentSettings by settingsManager.settings.collectAsStateWithLifecycle()
                 val bootConfig by viewModel.bootConfig.collectAsStateWithLifecycle()
                 val cartridges by viewModel.cartridges.collectAsStateWithLifecycle()
                 val folderFiles by viewModel.folderFiles.collectAsStateWithLifecycle()
+                val saveStates by viewModel.saveStates.collectAsStateWithLifecycle()
                 val hardwareInfo by viewModel.hardwareInfo.collectAsStateWithLifecycle()
                 val conversionState by viewModel.conversionState.collectAsStateWithLifecycle()
                 val installedEmulators by viewModel.installedEmulators.collectAsStateWithLifecycle()
@@ -63,6 +70,10 @@ class MainActivity : ComponentActivity() {
                         viewModel.clearUserMessage()
                     }
                 }
+                
+                LaunchedEffect(currentSettings.targetFps) {
+                    viewModel.updateCoreSettings(currentSettings.targetFps)
+                }
 
                 if (activeSession.isRunning) {
                     ActiveEmulationScreen(
@@ -70,6 +81,7 @@ class MainActivity : ComponentActivity() {
                         coreState = coreState,
                         onToggleDocked = { viewModel.toggleDockedMode() },
                         onStopEmulation = { viewModel.stopEmulationSession() },
+                        onQuickSave = { viewModel.quickSaveCurrentEmulation() },
                         onRunDevSelfTest = { viewModel.runDevCpuSelfTest() }
                     )
                 } else {
@@ -96,6 +108,10 @@ class MainActivity : ComponentActivity() {
                                         bootConfig = bootConfig,
                                         hardwareInfo = hardwareInfo,
                                         conversionState = conversionState,
+                                        onImportKeysUri = { uri -> viewModel.importKeysFromUri(uri) },
+                                        onImportFirmwareUri = { uri -> viewModel.importFirmwareFromUri(uri) },
+                                        onQuickLoadVerifiedKeys = { viewModel.quickLoad100PercentKeys() },
+                                        onQuickLoadVerifiedFirmware = { viewModel.quickLoad100PercentFirmware() },
                                         onSelectBios = { name, path -> viewModel.selectBiosFile(name, path) },
                                         onSelectFirmware = { name, path -> viewModel.selectFirmwareFile(name, path) },
                                         onUpdateDns = { mode, customDns -> viewModel.updateDnsSetting(mode, customDns) },
@@ -122,7 +138,30 @@ class MainActivity : ComponentActivity() {
                                         cartridges = cartridges,
                                         onLaunchCartridge = { cartridge -> viewModel.launchCartridge(cartridge) },
                                         onDeleteCartridge = { id -> viewModel.deleteCartridge(id) },
-                                        onGoToMyFolder = { viewModel.selectTab(SwtcTab.MY_FOLDER) }
+                                        onGoToMyFolder = { viewModel.selectTab(SwtcTab.MY_FOLDER) },
+                                        onGoToSaveStates = { viewModel.selectTab(SwtcTab.SAVE_STATES) }
+                                    )
+
+                                    SwtcTab.SAVE_STATES -> SaveStatesScreen(
+                                        saveStates = saveStates,
+                                        cartridges = cartridges,
+                                        activeGameTitle = activeSession.gameTitle.ifEmpty { null },
+                                        onLoadState = { state -> viewModel.loadSaveState(state) },
+                                        onRenameState = { id, name -> viewModel.renameSaveState(id, name) },
+                                        onDeleteState = { id -> viewModel.deleteSaveState(id) },
+                                        onExportState = { state, uri -> viewModel.exportSaveState(state, uri) },
+                                        onShareState = { state ->
+                                            val intent = viewModel.getShareIntentForState(state)
+                                            if (intent != null) {
+                                                startActivity(intent)
+                                            } else {
+                                                viewModel.showUserMessage("Unable to share save state.")
+                                            }
+                                        },
+                                        onImportState = { uri -> viewModel.importSaveState(uri) },
+                                        onCreateNewState = { title, id, slot ->
+                                            viewModel.createSaveState(slotName = slot, gameTitle = title, titleId = id)
+                                        }
                                     )
 
                                     SwtcTab.WEB_ENVIRONMENT -> WebEnvironmentScreen(
@@ -135,6 +174,15 @@ class MainActivity : ComponentActivity() {
                                         onLaunchEmulator = { pkg ->
                                             com.example.emulator.TargetEmulatorManager.launchEmulatorApp(this@MainActivity, pkg)
                                         }
+                                    )
+                                    SwtcTab.SETTINGS -> SettingsScreen(
+                                        settings = currentSettings,
+                                        bootConfig = bootConfig,
+                                        onImportKeysUri = { uri -> viewModel.importKeysFromUri(uri) },
+                                        onImportFirmwareUri = { uri -> viewModel.importFirmwareFromUri(uri) },
+                                        onQuickLoadVerifiedKeys = { viewModel.quickLoad100PercentKeys() },
+                                        onQuickLoadVerifiedFirmware = { viewModel.quickLoad100PercentFirmware() },
+                                        onSettingsChanged = { newSettings -> settingsManager.updateSettings(newSettings) }
                                     )
                                 }
                             }

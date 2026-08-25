@@ -80,4 +80,23 @@ class NspParser {
         System.arraycopy(nspData, dataOffset.toInt(), result, 0, entry.size.toInt())
         return result
     }
+
+    // ==========================================
+    // NATIVE C++ PFS0 & NCA MOUNTING BINDINGS
+    // ==========================================
+    external fun nativeMountNsp(nspByteArray: ByteArray): Boolean
+    external fun nativeGetExeFsFileCount(): Int
+    external fun nativeGetExeFsFileName(index: Int): String
+    external fun nativeGetExeFsFileSize(index: Int): Long
+    external fun nativeUnmountNsp()
+
+    companion object {
+        init {
+            try {
+                System.loadLibrary("vulkan_backend")
+            } catch (e: UnsatisfiedLinkError) {
+                // Ignore if in unit test environment without native lib
+            }
+        }
+    }
 }

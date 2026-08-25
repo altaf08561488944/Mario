@@ -21,16 +21,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -74,6 +77,7 @@ fun ActiveEmulationScreen(
     coreState: SwitchCoreState,
     onToggleDocked: () -> Unit,
     onStopEmulation: () -> Unit,
+    onQuickSave: (() -> Unit)? = null,
     onRunDevSelfTest: (() -> Unit)? = null
 ) {
     var selectedHudTab by remember { mutableIntStateOf(0) } // 0: CANVAS, 1: CPU ARM64, 2: TEGRA GPU, 3: HORIZON SVC
@@ -134,14 +138,27 @@ fun ActiveEmulationScreen(
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (onQuickSave != null) {
+                            Button(
+                                onClick = onQuickSave,
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonBlue),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.testTag("quick_save_button")
+                            ) {
+                                Icon(Icons.Default.Save, contentDescription = "Quick Save", tint = Color.Black, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("SAVE", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color.Black)
+                            }
+                        }
+
                         OutlinedButton(
                             onClick = onToggleDocked,
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Icon(Icons.Default.Tv, contentDescription = null, tint = if (coreState.isDockedMode) NeonYellow else Color.White, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(if (coreState.isDockedMode) "DOCKED (1080p)" else "HANDHELD (720p)", fontSize = 11.sp, color = Color.White)
+                            Text(if (coreState.isDockedMode) "DOCKED" else "HANDHELD", fontSize = 11.sp, color = Color.White)
                         }
 
                         Button(

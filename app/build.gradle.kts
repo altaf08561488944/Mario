@@ -39,7 +39,14 @@ android {
     }
   }
 
-  buildTypes {
+  externalNativeBuild {
+        cmake {
+            path("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+    
+    buildTypes {
     release {
       isCrunchPngs = false
       isMinifyEnabled = false

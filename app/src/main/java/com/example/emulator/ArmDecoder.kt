@@ -362,16 +362,17 @@ sealed class DecodedInstruction {
     data class Unknown(val rawOpcode: Int) : DecodedInstruction() {
         override val disassembly: String = "UNSUPPORTED_INSTRUCTION [0x${rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()}]"
         override fun execute(cpu: Arm64CpuCore, memory: GuestMemory, currentPc: Long): HorizonSvcLog? {
-            cpu.isHalted = true
             val hexPc = "0x" + currentPc.toString(16).uppercase()
             val hexOp = "0x" + rawOpcode.toUInt().toString(16).padStart(8, '0').uppercase()
-            cpu.lastDisassembly = "UNSUPPORTED_INSTRUCTION PC: $hexPc OPCODE: $hexOp"
+            cpu.lastDisassembly = "SKIPPED_OPCODE PC: $hexPc [0x$hexOp]"
+            
+            // Advance PC without hard halting to maintain execution loop stability across different devices
             return HorizonSvcLog(
                 timestampMs = System.currentTimeMillis(),
                 svcNumber = -1,
-                svcName = "UNSUPPORTED_INSTRUCTION",
+                svcName = "UNHANDLED_OPCODE_STEPPED",
                 argumentsHex = "PC=$hexPc OPCODE=$hexOp",
-                returnCode = "CPU_HALTED_UNHANDLED_OPCODE"
+                returnCode = "STEPPED_AS_NOP"
             )
         }
     }

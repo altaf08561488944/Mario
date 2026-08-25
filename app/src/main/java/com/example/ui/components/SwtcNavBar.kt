@@ -4,13 +4,16 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Games
 import androidx.compose.material.icons.filled.Hardware
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RocketLaunch
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SdStorage
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -43,10 +46,12 @@ fun SwtcNavBar(
     val items = listOf(
         NavTabItem(SwtcTab.BOOT_SETUP, "Boot", Icons.Default.RocketLaunch),
         NavTabItem(SwtcTab.VIRTUAL_STORAGE, "Storage", Icons.Default.SdStorage),
-        NavTabItem(SwtcTab.MY_FOLDER, "My Folder", Icons.Default.Folder),
+        NavTabItem(SwtcTab.MY_FOLDER, "Folder", Icons.Default.Folder),
         NavTabItem(SwtcTab.CARTRIDGE_LIBRARY, "Library", Icons.Default.Games),
+        NavTabItem(SwtcTab.SAVE_STATES, "States", Icons.Default.Save),
         NavTabItem(SwtcTab.WEB_ENVIRONMENT, "Web", Icons.Default.Public),
-        NavTabItem(SwtcTab.HARDWARE_MONITOR, "Hardware", Icons.Default.Hardware)
+        NavTabItem(SwtcTab.HARDWARE_MONITOR, "Hardware", Icons.Default.Hardware),
+        NavTabItem(SwtcTab.SETTINGS, "Settings", Icons.Default.Settings)
     )
 
     NavigationBar(

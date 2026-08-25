@@ -12,10 +12,41 @@ class MemoryManagementUnit {
     companion object {
         const val PAGE_SIZE = 4096L
         const val PAGE_MASK = (PAGE_SIZE - 1).inv()
+
+        // Page Permissions
+        const val PERM_READ = 1
+        const val PERM_WRITE = 2
+        const val PERM_EXEC = 4
+        const val PERM_GPU_READ = 8
+        const val PERM_GPU_WRITE = 16
+
+        private var isNativeLoaded = false
+
+        init {
+            try {
+                System.loadLibrary("vulkan_backend")
+                isNativeLoaded = true
+            } catch (e: UnsatisfiedLinkError) {
+                isNativeLoaded = false
+            }
+        }
     }
 
-    // Sparse Page Table: Maps Virtual Page Number (VPN) to actual allocated ByteArrays
-    // This ensures we only allocate RAM when the guest actually uses it.
+    // Native JNI functions
+    private external fun nativeMapMemory(vaddr: Long, size: Long, perms: Int): Boolean
+    private external fun nativeUnmapMemory(vaddr: Long, size: Long): Boolean
+    private external fun nativeRead8(vaddr: Long): Byte
+    private external fun nativeWrite8(vaddr: Long, value: Byte)
+    private external fun nativeRead32(vaddr: Long): Int
+    private external fun nativeWrite32(vaddr: Long, value: Int)
+    private external fun nativeRead64(vaddr: Long): Long
+    private external fun nativeWrite64(vaddr: Long, value: Long)
+    private external fun nativeGetAllocatedBytes(): Long
+    private external fun nativeGetTlbHits(): Long
+    private external fun nativeGetTlbMisses(): Long
+    private external fun nativeReset()
+
+    // Sparse Page Table fallback: Maps Virtual Page Number (VPN) to actual allocated ByteArrays
     private val pageTable = ConcurrentHashMap<Long, Page>()
 
     data class Page(
@@ -27,6 +58,14 @@ class MemoryManagementUnit {
     )
 
     fun allocateMemory(vaddr: Long, size: Long, read: Boolean, write: Boolean, exec: Boolean) {
+        if (isNativeLoaded) {
+            var perms = 0
+            if (read) perms = perms or PERM_READ or PERM_GPU_READ
+            if (write) perms = perms or PERM_WRITE or PERM_GPU_WRITE
+            if (exec) perms = perms or PERM_EXEC
+            nativeMapMemory(vaddr, size, perms)
+        }
+
         var currentAddr = vaddr and PAGE_MASK
         val endAddr = (vaddr + size + PAGE_SIZE - 1) and PAGE_MASK
 
@@ -50,6 +89,10 @@ class MemoryManagementUnit {
     }
 
     fun write8(vaddr: Long, value: Byte) {
+        if (isNativeLoaded) {
+            nativeWrite8(vaddr, value)
+            return
+        }
         val page = getPage(vaddr)
         if (!page.isWritable) throw MemoryFaultException(vaddr, "Memory is not writable")
         val offset = (vaddr and (PAGE_SIZE - 1)).toInt()
@@ -57,6 +100,9 @@ class MemoryManagementUnit {
     }
 
     fun read8(vaddr: Long): Byte {
+        if (isNativeLoaded) {
+            return nativeRead8(vaddr)
+        }
         val page = getPage(vaddr)
         if (!page.isReadable) throw MemoryFaultException(vaddr, "Memory is not readable")
         val offset = (vaddr and (PAGE_SIZE - 1)).toInt()
@@ -64,6 +110,10 @@ class MemoryManagementUnit {
     }
 
     fun write32(vaddr: Long, value: Int) {
+        if (isNativeLoaded) {
+            nativeWrite32(vaddr, value)
+            return
+        }
         val page = getPage(vaddr)
         if (!page.isWritable) throw MemoryFaultException(vaddr, "Memory is not writable")
         val offset = (vaddr and (PAGE_SIZE - 1)).toInt()
@@ -82,6 +132,9 @@ class MemoryManagementUnit {
     }
 
     fun read32(vaddr: Long): Int {
+        if (isNativeLoaded) {
+            return nativeRead32(vaddr)
+        }
         val page = getPage(vaddr)
         if (!page.isReadable) throw MemoryFaultException(vaddr, "Memory is not readable")
         val offset = (vaddr and (PAGE_SIZE - 1)).toInt()
@@ -98,6 +151,39 @@ class MemoryManagementUnit {
             val b3 = read8(vaddr + 3).toInt() and 0xFF
             return b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
         }
+    }
+
+    fun write64(vaddr: Long, value: Long) {
+        if (isNativeLoaded) {
+            nativeWrite64(vaddr, value)
+            return
+        }
+        write32(vaddr, (value and 0xFFFFFFFFL).toInt())
+        write32(vaddr + 4, ((value ushr 32) and 0xFFFFFFFFL).toInt())
+    }
+
+    fun read64(vaddr: Long): Long {
+        if (isNativeLoaded) {
+            return nativeRead64(vaddr)
+        }
+        val low = read32(vaddr).toLong() and 0xFFFFFFFFL
+        val high = read32(vaddr + 4).toLong() and 0xFFFFFFFFL
+        return low or (high shl 32)
+    }
+
+    fun reset() {
+        if (isNativeLoaded) {
+            nativeReset()
+        }
+        pageTable.clear()
+    }
+
+    fun getTlbHitRatio(): Float {
+        if (!isNativeLoaded) return 1.0f
+        val hits = nativeGetTlbHits()
+        val misses = nativeGetTlbMisses()
+        val total = hits + misses
+        return if (total > 0) (hits.toFloat() / total.toFloat()) * 100f else 100f
     }
     
     fun readBytes(vaddr: Long, length: Int): ByteArray {

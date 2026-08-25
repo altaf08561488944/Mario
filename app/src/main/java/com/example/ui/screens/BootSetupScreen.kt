@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,12 +24,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Hardware
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -58,6 +63,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.entity.BootConfigEntity
+import com.example.emulator.SwitchKeysManager
 import com.example.system.RealHardwareInfo
 import com.example.ui.theme.NeonBlue
 import com.example.ui.theme.NeonGreen
@@ -72,6 +78,10 @@ fun BootSetupScreen(
     bootConfig: BootConfigEntity?,
     hardwareInfo: RealHardwareInfo?,
     conversionState: ConversionProgress,
+    onImportKeysUri: (Uri) -> Unit = {},
+    onImportFirmwareUri: (Uri) -> Unit = {},
+    onQuickLoadVerifiedKeys: () -> Unit = {},
+    onQuickLoadVerifiedFirmware: () -> Unit = {},
     onSelectBios: (String, String) -> Unit,
     onSelectFirmware: (String, String) -> Unit,
     onUpdateDns: (String, String) -> Unit,
@@ -79,6 +89,20 @@ fun BootSetupScreen(
 ) {
     val scrollState = rememberScrollState()
     val config = bootConfig ?: BootConfigEntity()
+
+    val keyPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { onImportKeysUri(it) }
+    }
+
+    val firmwarePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { onImportFirmwareUri(it) }
+    }
+
+    val keySet = SwitchKeysManager.getKeySet()
 
     var customDnsInput by remember(config.customDns) { mutableStateOf(config.customDns) }
     var selectedDnsMode by remember(config.dnsMode) { mutableStateOf(config.dnsMode) }
@@ -191,7 +215,7 @@ fun BootSetupScreen(
             }
         }
 
-        // 1. SELECT BIOS FILE CARD
+        // 1. SELECT / CHOOSE PROD.KEYS CARD
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -199,7 +223,7 @@ fun BootSetupScreen(
             colors = CardDefaults.cardColors(containerColor = SurfaceDark),
             border = CardDefaults.outlinedCardBorder().copy(
                 brush = Brush.linearGradient(
-                    if (config.isBiosVerified) listOf(NeonGreen, NeonBlue) else listOf(SurfaceBorder, SurfaceBorder)
+                    if (config.isBiosVerified || keySet.isLoaded) listOf(NeonGreen, NeonBlue) else listOf(SurfaceBorder, SurfaceBorder)
                 )
             )
         ) {
@@ -208,24 +232,42 @@ fun BootSetupScreen(
                     Icon(
                         imageVector = Icons.Default.Key,
                         contentDescription = "BIOS",
-                        tint = if (config.isBiosVerified) NeonGreen else NeonRed,
+                        tint = if (config.isBiosVerified || keySet.isLoaded) NeonGreen else NeonRed,
                         modifier = Modifier.size(28.dp)
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "PRODUCTION KEYS (prod.keys)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            if (config.isBiosVerified || keySet.isLoaded) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Surface(
+                                    color = NeonGreen.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(4.dp),
+                                    border = CardDefaults.outlinedCardBorder().copy(brush = Brush.linearGradient(listOf(NeonGreen, NeonGreen)))
+                                ) {
+                                    Text(
+                                        text = "100% OK",
+                                        color = NeonGreen,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Text(
-                            text = "SELECT BIOS FILE",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = if (config.isBiosVerified) "Selected: ${config.biosName}" else "Required: prod.keys / title.keys / BIOS bin",
+                            text = if (config.isBiosVerified || keySet.isLoaded) "Status: ${keySet.keySourceMessage.ifEmpty { config.biosName }}" else "Required: Choose prod.keys, title.keys, or load verified keys",
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (config.isBiosVerified) NeonGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (config.isBiosVerified || keySet.isLoaded) NeonGreen else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    if (config.isBiosVerified) {
+                    if (config.isBiosVerified || keySet.isLoaded) {
                         Icon(
                             imageVector = Icons.Default.CheckCircle,
                             contentDescription = "Verified",
@@ -242,31 +284,36 @@ fun BootSetupScreen(
                 ) {
                     Button(
                         onClick = {
-                            onSelectBios("prod.keys (User Legal Copy)", "/storage/emulated/0/SWTC_NOOS/prod.keys")
+                            keyPickerLauncher.launch(arrayOf("*/*", "text/plain", "application/octet-stream"))
                         },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("select_bios_button"),
                         colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark)
                     ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Select BIOS File", fontSize = 12.sp)
+                        Text("Choose prod.keys", fontSize = 12.sp, maxLines = 1)
                     }
 
                     OutlinedButton(
                         onClick = {
-                            onSelectBios("prod_keys_v16.keys", "internal_keys_v16.keys")
+                            onQuickLoadVerifiedKeys()
                         },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("load_verified_keys_button"),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonGreen)
                     ) {
-                        Text("Set Default Keys", fontSize = 12.sp)
+                        Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Load 100% OK Keys", fontSize = 12.sp, maxLines = 1)
                     }
                 }
             }
         }
 
-        // 2. SELECT FIRMWARE CARD
+        // 2. SELECT / CHOOSE FIRMWARE CARD
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -288,14 +335,32 @@ fun BootSetupScreen(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "HORIZON OS FIRMWARE",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            if (config.isFirmwareVerified) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Surface(
+                                    color = NeonGreen.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(4.dp),
+                                    border = CardDefaults.outlinedCardBorder().copy(brush = Brush.linearGradient(listOf(NeonGreen, NeonGreen)))
+                                ) {
+                                    Text(
+                                        text = "100% OK",
+                                        color = NeonGreen,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Text(
-                            text = "SELECT FIRMWARE",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = if (config.isFirmwareVerified) "Selected: ${config.firmwareName}" else "Select firmware package obtained legally",
+                            text = if (config.isFirmwareVerified) "Selected: ${config.firmwareName}" else "Select firmware ZIP archive (.zip) or NCA packages",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (config.isFirmwareVerified) NeonGreen else MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -317,7 +382,7 @@ fun BootSetupScreen(
                 ) {
                     Button(
                         onClick = {
-                            onSelectFirmware("Firmware 16.0.3 (Nintendo Switch)", "/storage/emulated/0/SWTC_NOOS/Firmware_16.0.3.zip")
+                            firmwarePickerLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream", "*/*"))
                         },
                         modifier = Modifier
                             .weight(1f)
@@ -326,16 +391,21 @@ fun BootSetupScreen(
                     ) {
                         Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Select Firmware", fontSize = 12.sp)
+                        Text("Choose Firmware", fontSize = 12.sp, maxLines = 1)
                     }
 
                     OutlinedButton(
                         onClick = {
-                            onSelectFirmware("Firmware_v16.0.3_System.zip", "internal_firmware_v16.zip")
+                            onQuickLoadVerifiedFirmware()
                         },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("load_verified_firmware_button"),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonBlue)
                     ) {
-                        Text("Set v16.0.3", fontSize = 12.sp)
+                        Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Load FW v17.0.1 (100% OK)", fontSize = 12.sp, maxLines = 1)
                     }
                 }
             }

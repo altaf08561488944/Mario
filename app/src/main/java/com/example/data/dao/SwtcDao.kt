@@ -7,6 +7,7 @@ import androidx.room.Query
 import androidx.room.Update
 import com.example.data.entity.BootConfigEntity
 import com.example.data.entity.MyFolderFileEntity
+import com.example.data.entity.SaveStateEntity
 import com.example.data.entity.VirtualCartridgeEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -42,4 +43,28 @@ interface SwtcDao {
 
     @Query("DELETE FROM my_folder_files")
     suspend fun clearFolderFiles()
+
+    @Query("SELECT * FROM save_states ORDER BY timestamp DESC")
+    fun getAllSaveStatesFlow(): Flow<List<SaveStateEntity>>
+
+    @Query("SELECT * FROM save_states WHERE titleId = :titleId ORDER BY timestamp DESC")
+    fun getSaveStatesForTitleFlow(titleId: String): Flow<List<SaveStateEntity>>
+
+    @Query("SELECT * FROM save_states WHERE id = :id")
+    suspend fun getSaveStateById(id: String): SaveStateEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSaveState(state: SaveStateEntity)
+
+    @Update
+    suspend fun updateSaveState(state: SaveStateEntity)
+
+    @Query("UPDATE save_states SET slotName = :newName WHERE id = :id")
+    suspend fun renameSaveState(id: String, newName: String)
+
+    @Query("DELETE FROM save_states WHERE id = :id")
+    suspend fun deleteSaveState(id: String)
+
+    @Query("DELETE FROM save_states WHERE titleId = :titleId")
+    suspend fun deleteSaveStatesForTitle(titleId: String)
 }

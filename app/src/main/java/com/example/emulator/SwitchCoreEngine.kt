@@ -1,6 +1,8 @@
 package com.example.emulator
 
 import com.example.emulator.gpu.FramePacer
+import com.example.emulator.telemetry.TelemetryLogger
+import com.example.emulator.cpu.JitPreCompiler
 
 import android.graphics.Bitmap
 import com.example.data.entity.VirtualCartridgeEntity
@@ -76,6 +78,8 @@ class SwitchCoreEngine {
     // Genuine Emulator Hardware Subsystems
     private val memory = GuestMemory()
     private val cpuCores = Array(4) { id -> Arm64CpuCore(id) }
+    private val telemetryLogger = TelemetryLogger()
+    private val jitPrecompiler = JitPreCompiler()
     
     // Advanced Virtual Machine Subsystems
     val mmu = com.example.emulator.memory.MemoryManagementUnit() // Advanced Virtual Memory
@@ -94,6 +98,10 @@ class SwitchCoreEngine {
     
     private val gpu = TegraGpuEmulator()
     private val framePacer = FramePacer(60)
+
+    fun applySettings(targetFps: Int) {
+        framePacer.setTargetFps(targetFps)
+    }
 
     fun startEmulation(
         cartridge: VirtualCartridgeEntity,
@@ -223,6 +231,8 @@ class SwitchCoreEngine {
     private fun startExecutionLoop(titleName: String, titleId: String) {
         // Multi-core parallel execution pipeline to eliminate CPU lag
         executionJob = scope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            telemetryLogger.startLogging()
+            jitPrecompiler.startWorker()
             val svcLogHistory = java.util.concurrent.CopyOnWriteArrayList<HorizonSvcLog>()
             var lastDisasm = "NOP"
             var activeCoreIndex = 0
@@ -252,6 +262,8 @@ class SwitchCoreEngine {
                 var frameCounter = 0L
                 while (engineState.value.isRunning) {
                     framePacer.paceFrame() // Dynamic Frame Pacing & VSync
+                    telemetryLogger.logFps(60f)
+                    if (frameCounter % 60L == 0L) jitPrecompiler.simulateHotPathDetection()
                     frameCounter++
 
                     val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }
@@ -311,6 +323,8 @@ class SwitchCoreEngine {
     }
 
     fun stopEmulation() {
+        telemetryLogger.stopLoggingAndExport()
+        jitPrecompiler.stopWorker()
         executionJob?.cancel()
         executionJob = null
         _engineState.value = SwitchCoreState(isRunning = false, lifecycleState = GameLifecycleState.FILE_SELECTED)

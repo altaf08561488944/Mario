@@ -4,8 +4,11 @@ import android.content.Context
 import com.example.data.dao.SwtcDao
 import com.example.data.entity.BootConfigEntity
 import com.example.data.entity.MyFolderFileEntity
+import com.example.data.entity.SaveStateEntity
 import com.example.data.entity.VirtualCartridgeEntity
+import com.example.emulator.SwitchCoreState
 import com.example.storage.CartridgeBuildResult
+import com.example.storage.SaveStateManager
 import com.example.storage.SupContainerProcessor
 import com.example.storage.VirtualStorageManager
 import com.example.storage.VirtualStorageStats
@@ -13,9 +16,11 @@ import com.example.system.HardwareInspector
 import com.example.system.RealHardwareInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import java.io.File
+import android.net.Uri
 
 class SwtcRepository(
     private val context: Context,
@@ -118,5 +123,88 @@ class SwtcRepository(
 
     fun inspectDeviceHardware(): RealHardwareInfo {
         return HardwareInspector.inspectDevice(context)
+    }
+
+    // ==========================================
+    // SAVE STATE OPERATIONS
+    // ==========================================
+
+    fun getAllSaveStatesFlow(): Flow<List<SaveStateEntity>> = dao.getAllSaveStatesFlow()
+
+    fun getSaveStatesForTitleFlow(titleId: String): Flow<List<SaveStateEntity>> = dao.getSaveStatesForTitleFlow(titleId)
+
+    suspend fun createSaveState(
+        gameTitle: String,
+        titleId: String,
+        slotName: String,
+        coreState: SwitchCoreState?,
+        slotIndex: Int = 0,
+        isAutoSave: Boolean = false
+    ): SaveStateEntity = withContext(Dispatchers.IO) {
+        val entity = SaveStateManager.createSaveState(
+            context = context,
+            gameTitle = gameTitle,
+            titleId = titleId,
+            slotName = slotName,
+            coreState = coreState,
+            slotIndex = slotIndex,
+            isAutoSave = isAutoSave
+        )
+        dao.insertSaveState(entity)
+        entity
+    }
+
+    suspend fun renameSaveState(id: String, newName: String) = withContext(Dispatchers.IO) {
+        dao.renameSaveState(id, newName)
+    }
+
+    suspend fun deleteSaveState(id: String) = withContext(Dispatchers.IO) {
+        val state = dao.getSaveStateById(id)
+        if (state != null) {
+            SaveStateManager.deleteStateFiles(state)
+            dao.deleteSaveState(id)
+        }
+    }
+
+    suspend fun exportSaveState(state: SaveStateEntity, targetUri: Uri): Boolean = withContext(Dispatchers.IO) {
+        SaveStateManager.exportStateToUri(context, state, targetUri)
+    }
+
+    suspend fun importSaveState(sourceUri: Uri): SaveStateEntity? = withContext(Dispatchers.IO) {
+        val state = SaveStateManager.importStateFromUri(context, sourceUri)
+        if (state != null) {
+            dao.insertSaveState(state)
+        }
+        state
+    }
+
+    suspend fun initializeDemoSaveStatesIfEmpty() = withContext(Dispatchers.IO) {
+        val existing = dao.getAllSaveStatesFlow().firstOrNull()
+        if (existing.isNullOrEmpty()) {
+            createSaveState(
+                gameTitle = "Super Mario Odyssey",
+                titleId = "0100000000010000",
+                slotName = "Slot 1 - Cascade Kingdom Power Moon 12",
+                coreState = null,
+                slotIndex = 1,
+                isAutoSave = false
+            )
+            createSaveState(
+                gameTitle = "Super Mario Odyssey",
+                titleId = "0100000000010000",
+                slotName = "Auto Save - Metro Kingdom Rooftops",
+                coreState = null,
+                slotIndex = 0,
+                isAutoSave = true
+            )
+            createSaveState(
+                gameTitle = "The Legend of Zelda: Tears of the Kingdom",
+                titleId = "0100F2C0115B6000",
+                slotName = "Slot 1 - Great Sky Island Temple",
+                coreState = null,
+                slotIndex = 1,
+                isAutoSave = false
+            )
+        }
     }
 }

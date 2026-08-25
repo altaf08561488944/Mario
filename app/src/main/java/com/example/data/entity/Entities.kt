@@ -44,3 +44,21 @@ data class MyFolderFileEntity(
     val isConvertedSup: Boolean = false,
     val isConvertedCartridge: Boolean = false
 )
+
+@Entity(tableName = "save_states")
+data class SaveStateEntity(
+    @PrimaryKey val id: String,
+    val titleId: String,
+    val gameTitle: String,
+    val slotName: String,
+    val fileName: String,
+    val filePath: String,
+    val previewImagePath: String? = null,
+    val slotIndex: Int = 0,
+    val timestamp: Long = System.currentTimeMillis(),
+    val sizeBytes: Long = 0L,
+    val isAutoSave: Boolean = false,
+    val coreSummary: String = "Core 0 @ 0x7100041280 • 60 FPS",
+    val instructionsExecuted: Long = 0L,
+    val isDocked: Boolean = true
+)

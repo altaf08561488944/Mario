@@ -18,9 +18,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Games
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.VideogameAsset
 import androidx.compose.material3.Button
@@ -58,7 +60,8 @@ fun CartridgeLibraryScreen(
     cartridges: List<VirtualCartridgeEntity>,
     onLaunchCartridge: (VirtualCartridgeEntity) -> Unit,
     onDeleteCartridge: (String) -> Unit,
-    onGoToMyFolder: () -> Unit
+    onGoToMyFolder: () -> Unit,
+    onGoToSaveStates: (() -> Unit)? = null
 ) {
     Column(
         modifier = Modifier
@@ -106,6 +109,20 @@ fun CartridgeLibraryScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = NeonGreen
                         )
+                    }
+                }
+
+                if (onGoToSaveStates != null) {
+                    OutlinedButton(
+                        onClick = onGoToSaveStates,
+                        shape = RoundedCornerShape(12.dp),
+                        border = ButtonDefaults.outlinedButtonBorder.copy(
+                            brush = Brush.horizontalGradient(listOf(NeonBlue, NeonGreen))
+                        )
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, tint = NeonBlue, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Save States", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
