@@ -23,6 +23,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Games
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.VideogameAsset
 import androidx.compose.material3.Button
@@ -61,7 +63,8 @@ fun CartridgeLibraryScreen(
     onLaunchCartridge: (VirtualCartridgeEntity) -> Unit,
     onDeleteCartridge: (String) -> Unit,
     onGoToMyFolder: () -> Unit,
-    onGoToSaveStates: (() -> Unit)? = null
+    onGoToSaveStates: (() -> Unit)? = null,
+    onScanDevice: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -123,6 +126,24 @@ fun CartridgeLibraryScreen(
                         Icon(Icons.Default.Save, contentDescription = null, tint = NeonBlue, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Save States", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    
+                    Spacer(modifier = Modifier.width(8.dp))
+                    
+                    Button(
+                        onClick = onScanDevice,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.height(32.dp).border(
+                            1.dp,
+                            Brush.horizontalGradient(listOf(NeonBlue, NeonGreen)),
+                            RoundedCornerShape(12.dp)
+                        )
+                    ) {
+                        Icon(Icons.Default.Search, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Scan Device", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

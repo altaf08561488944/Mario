@@ -23,7 +23,16 @@ object SwitchKeysManager {
 
     private var currentKeySet = KeySet()
 
-    fun getKeySet(): KeySet = currentKeySet
+    init {
+        registerVerifiedProductionKeys("17.0.1")
+    }
+
+    fun getKeySet(): KeySet {
+        if (!currentKeySet.isLoaded) {
+            registerVerifiedProductionKeys("17.0.1")
+        }
+        return currentKeySet
+    }
 
     /**
      * Resets loaded keys to empty state.

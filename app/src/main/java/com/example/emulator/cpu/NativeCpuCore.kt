@@ -12,6 +12,9 @@ class NativeCpuCore {
 
     external fun nativeInitialize()
     external fun nativeExecute(ticks: Int): Int
+    external fun nativeLoadNro(nroPath: String): Boolean
+    external fun nativeLoadNsp(nspPath: String): Boolean
+
 
     fun initialize() {
         try {
@@ -29,6 +32,20 @@ class NativeCpuCore {
     fun execute(ticks: Int) {
         if (isLoaded) {
             nativeExecute(ticks)
+        }
+    }
+    
+    fun loadExecutable(path: String, format: String): Boolean {
+        if (!isLoaded) return false
+        return try {
+            when (format.lowercase()) {
+                "nro" -> nativeLoadNro(path)
+                "nsp" -> nativeLoadNsp(path)
+                else -> false
+            }
+        } catch (e: Exception) {
+            Log.e("NativeCpuCore", "Failed to load executable: ${e.message}")
+            false
         }
     }
 }

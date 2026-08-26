@@ -8,6 +8,7 @@ add_library(
         vulkan_validation.cpp
         pipeline_cache.cpp
         cpu_engine.cpp
+        gpu_engine.cpp
         gpu_maxwell.cpp
         shader_recompiler.cpp
         horizon_hle.cpp

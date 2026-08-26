@@ -12,6 +12,7 @@ import com.example.storage.SaveStateManager
 import com.example.storage.SupContainerProcessor
 import com.example.storage.VirtualStorageManager
 import com.example.storage.VirtualStorageStats
+import com.example.storage.LibraryScannerService
 import com.example.system.HardwareInspector
 import com.example.system.RealHardwareInfo
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +29,7 @@ class SwtcRepository(
 ) {
     private val storageManager = VirtualStorageManager(context)
     private val supProcessor = SupContainerProcessor(context)
+    private val libraryScanner = LibraryScannerService(context, dao)
 
     fun getBootConfigFlow(): Flow<BootConfigEntity?> = dao.getBootConfigFlow()
 
@@ -89,6 +91,10 @@ class SwtcRepository(
             lastModified = System.currentTimeMillis()
         )
         dao.insertFolderFile(entity)
+    }
+
+    suspend fun scanAndPopulateLibrary(): Int = withContext(Dispatchers.IO) {
+        libraryScanner.scanAndPopulateLibrary()
     }
 
     fun getVirtualStorageStats(capacityGb: Int): VirtualStorageStats {

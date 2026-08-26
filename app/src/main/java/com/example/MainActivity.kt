@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
                         coreState = coreState,
                         onToggleDocked = { viewModel.toggleDockedMode() },
                         onStopEmulation = { viewModel.stopEmulationSession() },
+                        onSurfaceReady = { surface -> viewModel.setVulkanSurface(surface) },
                         onQuickSave = { viewModel.quickSaveCurrentEmulation() },
                         onRunDevSelfTest = { viewModel.runDevCpuSelfTest() },
                         onJoystick = { x, y -> viewModel.onControllerJoystick(x, y) },
@@ -144,7 +145,8 @@ class MainActivity : ComponentActivity() {
                                         onLaunchCartridge = { cartridge -> viewModel.launchCartridge(cartridge) },
                                         onDeleteCartridge = { id -> viewModel.deleteCartridge(id) },
                                         onGoToMyFolder = { viewModel.selectTab(SwtcTab.MY_FOLDER) },
-                                        onGoToSaveStates = { viewModel.selectTab(SwtcTab.SAVE_STATES) }
+                                        onGoToSaveStates = { viewModel.selectTab(SwtcTab.SAVE_STATES) },
+                                        onScanDevice = { viewModel.scanDeviceForCartridges() }
                                     )
 
                                     SwtcTab.SAVE_STATES -> SaveStatesScreen(

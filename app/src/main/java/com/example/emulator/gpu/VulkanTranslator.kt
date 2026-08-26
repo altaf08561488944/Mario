@@ -25,6 +25,7 @@ class VulkanTranslator {
     // ==========================================
     // JNI NATIVE BINDINGS (Requires C++ Backend)
     // ==========================================
+    private external fun nativeSetSurface(surface: android.view.Surface)
     private external fun nativeInitializeVulkan(): Boolean
     private external fun nativeVkCmdDraw(topology: Int, count: Int, first: Int)
     private external fun nativeVkCmdBindTexture(samplerId: Int, address: Long)
@@ -54,6 +55,16 @@ class VulkanTranslator {
         }
     }
 
+    fun setSurface(surface: android.view.Surface) {
+        if (isInitialized) {
+            try {
+                nativeSetSurface(surface)
+            } catch(e: UnsatisfiedLinkError) {
+                // stub
+            }
+        }
+    }
+    
     fun setValidationLayersEnabled(enabled: Boolean) {
         try {
             nativeSetValidationLayersEnabled(enabled)

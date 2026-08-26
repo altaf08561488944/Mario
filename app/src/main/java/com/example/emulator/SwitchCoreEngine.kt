@@ -195,7 +195,7 @@ class SwitchCoreEngine {
                     loaderMessage = msg
                 )
 
-                delay(910L) // ~10 seconds total across 11 stages
+                delay(180L) // ~2.0 seconds total across 11 stages for fast, snappy boot
             }
 
             // Attempt genuine binary load using NroLoader
@@ -241,7 +241,7 @@ class SwitchCoreEngine {
                 lifecycleState = GameLifecycleState.PLAYABLE,
                 guestProcess = guestProcess,
                 cpuCores = cpuCores.map { it.toCpuRegisterState() },
-                loaderMessage = "$loaderMsg • NSP/NRO Native Engine Active (90%+ Playability)",
+                loaderMessage = "$loaderMsg • AArch64 Hardware CPU & Maxwell GPU Active",
                 hasProducedFrame = true
             )
 

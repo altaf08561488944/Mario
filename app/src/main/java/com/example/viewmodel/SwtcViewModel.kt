@@ -706,6 +706,18 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
     private val switchCoreEngine = com.example.emulator.SwitchCoreEngine()
     val coreEngineState: StateFlow<com.example.emulator.SwitchCoreState> = switchCoreEngine.engineState
 
+
+    fun scanDeviceForCartridges() {
+        viewModelScope.launch {
+            val count = repository.scanAndPopulateLibrary()
+            if (count > 0) {
+                showUserMessage("Scan complete: Found and added $count new cartridges.")
+            } else {
+                showUserMessage("Scan complete: No new games found.")
+            }
+        }
+    }
+
     fun launchCartridge(cartridge: VirtualCartridgeEntity) {
         // Pre-Emulation Security & Key Verification Gatekeeper
         val keyStatus = secureKeysManager.verifySystemKeysBeforeEmulation()
@@ -762,10 +774,15 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
         showUserMessage("Started Developer ARM64 CPU Self-Test Engine")
     }
 
+    
+    
+    fun setVulkanSurface(surface: android.view.Surface) { switchCoreEngine.vulkanGpu.setSurface(surface) }
     fun updateCoreSettings(settings: com.example.emulator.settings.EmulatorSettings) {
         switchCoreEngine.applySettings(settings)
     }
 
+    
+    
     fun updateCoreSettings(targetFps: Int) {
         switchCoreEngine.applySettings(targetFps)
     }

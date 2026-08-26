@@ -56,6 +56,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.viewinterop.AndroidView
+import android.view.SurfaceView
+import android.view.SurfaceHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -96,7 +99,8 @@ fun ActiveEmulationScreen(
     onQuickSave: (() -> Unit)? = null,
     onRunDevSelfTest: (() -> Unit)? = null,
     onJoystick: (Float, Float) -> Unit = { _, _ -> },
-    onButton: (SwitchButton, Boolean) -> Unit = { _, _ -> }
+    onButton: (SwitchButton, Boolean) -> Unit = { _, _ -> },
+    onSurfaceReady: ((android.view.Surface) -> Unit)? = null
 ) {
     var selectedHudTab by remember { mutableIntStateOf(0) } // 0: GAMEPLAY, 1: CPU ARM64, 2: TEGRA GPU, 3: HORIZON SVC
 
@@ -248,7 +252,7 @@ fun ActiveEmulationScreen(
                     .border(1.dp, SurfaceBorder, RoundedCornerShape(14.dp))
             ) {
                 when (selectedHudTab) {
-                    0 -> GameDisplayCanvas(session, coreState, onRunDevSelfTest)
+                    0 -> GameDisplayCanvas(session, coreState, onRunDevSelfTest, onSurfaceReady)
                     1 -> Arm64CpuViewer(coreState)
                     2 -> TegraGpuViewer(coreState)
                     3 -> HorizonSvcViewer(coreState)
@@ -267,7 +271,8 @@ fun ActiveEmulationScreen(
 private fun GameDisplayCanvas(
     session: ActiveEmulationSession,
     coreState: SwitchCoreState,
-    onRunDevSelfTest: (() -> Unit)? = null
+    onRunDevSelfTest: (() -> Unit)? = null,
+    onSurfaceReady: ((android.view.Surface) -> Unit)? = null
 ) {
     Box(
         modifier = Modifier
@@ -453,13 +458,23 @@ private fun GameDisplayCanvas(
                     )
                 }
             }
-        } else if (coreState.frameBitmap != null) {
-            Image(
-                bitmap = coreState.frameBitmap.asImageBitmap(),
-                contentDescription = "Live VRAM Framebuffer",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit
+                } else if (coreState.frameBitmap != null) {
+            AndroidView(
+                factory = { ctx ->
+                    SurfaceView(ctx).apply {
+                        holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                onSurfaceReady?.invoke(holder.surface)
+                            }
+                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+                        })
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
             )
+            // Still fallback to bitmap if needed, but surface takes over visually in AndroidView? Wait, no.
+            // Let's just overlay the SurfaceView when playability is reached.
         } else {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
