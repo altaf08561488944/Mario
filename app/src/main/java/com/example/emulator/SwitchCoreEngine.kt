@@ -200,7 +200,7 @@ class SwitchCoreEngine {
 
             // Attempt genuine binary load using NroLoader
             var loadedProcess: GuestProcess? = null
-            var loaderMsg = "Running at 60.0 FPS • Maxwell 3D Active"
+            var loaderMsg = "AArch64 Execution Pipeline Active"
 
             if (romFile.exists()) {
                 when (val loadResult = NroLoader.loadExecutableIntoMemory(romFile, memory, cpuCores[0])) {
@@ -209,30 +209,43 @@ class SwitchCoreEngine {
                         loaderMsg = "${loadResult.message} • ${loadResult.format}"
                     }
                     is NroLoader.LoadResult.Failure -> {
-                        // Log failure reason for telemetry & create HLE execution context
-                        loaderMsg = "HLE Fallback Execution: ${loadResult.reason} - ${loadResult.errorDetail}"
+                        _engineState.value = _engineState.value.copy(
+                            isRunning = false,
+                            isBooting = false,
+                            lifecycleState = GameLifecycleState.FAILED,
+                            errorMessage = loadResult.reason,
+                            errorDetail = "${loadResult.errorDetail}\n\n💡 Solution: ${loadResult.suggestedAction}",
+                            loaderMessage = "❌ Boot Failed: ${loadResult.reason}"
+                        )
+                        return@launch
                     }
                 }
+            } else {
+                _engineState.value = _engineState.value.copy(
+                    isRunning = false,
+                    isBooting = false,
+                    lifecycleState = GameLifecycleState.FAILED,
+                    errorMessage = "FILE_NOT_FOUND",
+                    errorDetail = "ROM file does not exist: ${romFile.absolutePath}",
+                    loaderMessage = "❌ File Not Found"
+                )
+                return@launch
             }
 
-            // Fallback / Primary Guest Process construction
-            val guestProcess = loadedProcess ?: GuestProcess(
-                titleId = cartridge.titleId,
-                processName = cartridge.title.take(16),
-                entryPoint = GuestMemory.CODE_BASE,
-                isAlive = true,
-                mappedSegments = listOf(".text (RX)", ".rodata (R)", ".data (RW)", ".bss (RW)", "VRAM (RW)"),
-                stackPointer = GuestMemory.STACK_TOP,
-                heapAddress = GuestMemory.HEAP_BASE,
-                tlsBaseAddress = GuestMemory.TLS_BASE,
-                modules = listOf("main", "sdk", "nnSdk", "nvn"),
-                loadedExecutableName = cartridge.title.take(16)
-            )
+            val guestProcess = loadedProcess ?: run {
+                _engineState.value = _engineState.value.copy(
+                    isRunning = false,
+                    isBooting = false,
+                    lifecycleState = GameLifecycleState.FAILED,
+                    errorMessage = "PROCESS_CREATION_FAILED",
+                    errorDetail = "Failed to construct valid Guest Process for ${cartridge.title}",
+                    loaderMessage = "❌ Execution Failed"
+                )
+                return@launch
+            }
 
             // Ensure CPU Core 0 is configured at process entry point
-            if (cpuCores[0].pc == 0L || cpuCores[0].pc == GuestMemory.CODE_BASE) {
-                cpuCores[0].reset(startPc = guestProcess.entryPoint, initialSp = guestProcess.stackPointer)
-            }
+            cpuCores[0].reset(startPc = guestProcess.entryPoint, initialSp = guestProcess.stackPointer)
 
             _engineState.value = _engineState.value.copy(
                 isRunning = true,

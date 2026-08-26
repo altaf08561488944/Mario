@@ -130,68 +130,43 @@ object NroLoader {
                 }
             }
 
-            // Resilient executable generation for full playability across all NSP, NRO, XCI files
+            // If genuine parsing fails, report precise technical error (zero fake playable)
             val keySet = SwitchKeysManager.getKeySet()
-            val hasKeys = keySet.isLoaded
-            val keyCount = keySet.loadedKeyCount
             val format = when {
-                file.name.endsWith(".nsp", ignoreCase = true) -> "NSP Package (Direct HLE Execution)"
-                file.name.endsWith(".nro", ignoreCase = true) -> "NRO Homebrew (Direct HLE Execution)"
-                file.name.endsWith(".xci", ignoreCase = true) -> "XCI Cartridge (Direct HLE Execution)"
-                else -> "Switch Container (HLE Execution)"
+                file.name.endsWith(".nsp", ignoreCase = true) -> "NSP Package Container"
+                file.name.endsWith(".nro", ignoreCase = true) -> "NRO Homebrew Executable"
+                file.name.endsWith(".xci", ignoreCase = true) -> "XCI Cartridge Image"
+                file.name.endsWith(".nca", ignoreCase = true) -> "NCA Content Archive"
+                else -> "Switch Container"
             }
 
-            return loadPlayableFallbackPayload(file, memory, cpu, format, "Container structure parsed ($keyCount Keys Active)")
+            val missingKeyInfo = if (!keySet.isLoaded || keySet.headerKey == null) {
+                "Required prod.keys (header_key / master_keys) are missing or incomplete."
+            } else {
+                "NCA section decryption or ExeFS partition extraction failed (unsupported format or title key missing)."
+            }
 
+            return LoadResult.Failure(
+                reason = "UNRECOGNIZED_OR_ENCRYPTED_FORMAT",
+                errorDetail = "Failed to parse $format from '${file.name}'. $missingKeyInfo Magic signatures verified.",
+                requiredKeyMissing = !keySet.isLoaded || keySet.headerKey == null,
+                suggestedAction = if (!keySet.isLoaded) "Import valid prod.keys via Settings/Boot Setup or load verified key set." else "Verify that the ROM is not corrupted and contains valid ExeFS/main.nso."
+            )
+
+        } catch (e: KeyValidationException) {
+            return LoadResult.Failure(
+                reason = e.error.errorCode.name,
+                errorDetail = "Cryptographic Key Error: ${e.error.message}",
+                requiredKeyMissing = true,
+                suggestedAction = "Import valid prod.keys containing '${e.error.missingKeyName ?: "required key"}'."
+            )
         } catch (e: Exception) {
-            val format = when {
-                file.name.endsWith(".nsp", ignoreCase = true) -> "NSP Package"
-                file.name.endsWith(".nro", ignoreCase = true) -> "NRO Homebrew"
-                file.name.endsWith(".xci", ignoreCase = true) -> "XCI Cartridge"
-                else -> "Switch Cartridge"
-            }
-            return loadPlayableFallbackPayload(file, memory, cpu, format, "Adaptive Playable Engine (${e.message ?: "Active"})")
+            return LoadResult.Failure(
+                reason = "CONTAINER_PARSING_EXCEPTION",
+                errorDetail = "Exception during executable parsing: ${e.javaClass.simpleName} - ${e.message}",
+                suggestedAction = "Check file integrity or re-dump clean cartridge."
+            )
         }
-    }
-
-    private fun loadPlayableFallbackPayload(
-        file: File,
-        memory: GuestMemory,
-        cpu: Arm64CpuCore,
-        formatName: String,
-        statusNote: String
-    ): LoadResult.Success {
-        val syntheticBytes = generateGenuineArm64ExecutablePayload(file.name)
-        memory.loadBinary(GuestMemory.CODE_BASE, syntheticBytes)
-        val tlsBase = setupThreadLocalStorage(memory)
-        cpu.reset(startPc = GuestMemory.CODE_BASE, initialSp = GuestMemory.STACK_TOP, initialTlsBase = tlsBase)
-
-        val cleanTitle = file.nameWithoutExtension.replace("_", " ").replace("-", " ")
-        val titleId = "0100" + file.name.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
-
-        val process = GuestProcess(
-            titleId = titleId,
-            processName = cleanTitle.take(32),
-            entryPoint = GuestMemory.CODE_BASE,
-            isAlive = true,
-            mappedSegments = listOf(".text (${syntheticBytes.size}B)", ".rodata (64KB)", ".data (128KB)", ".bss (256KB)", "VRAM Framebuffer (16MB)"),
-            stackPointer = GuestMemory.STACK_TOP,
-            heapAddress = GuestMemory.HEAP_BASE,
-            tlsBaseAddress = tlsBase,
-            modules = listOf(file.name, "main.nso", "sdk", "nnSdk", "nvn"),
-            loadedExecutableName = file.name
-        )
-
-        return LoadResult.Success(
-            guestProcess = process,
-            message = "✅ $formatName Loaded -> Playable AArch64 Machine Code @ 0x7100000000 ($statusNote)",
-            format = formatName,
-            titleId = titleId,
-            executableName = file.name,
-            textBytes = syntheticBytes.size,
-            rodataBytes = 65536,
-            dataBytes = 131072
-        )
     }
 
     /**

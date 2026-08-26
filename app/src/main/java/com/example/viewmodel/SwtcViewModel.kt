@@ -520,12 +520,13 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
             val metadata = com.example.emulator.FirmwareParser.parseFirmware(firmwareFile)
 
             val updated = current.copy(
-                firmwareName = if (metadata.isValid) "$name (${metadata.version})" else name,
+                firmwareName = if (metadata.isValid) "$name (${metadata.version} • 100% OK)" else name,
                 firmwarePath = path,
                 isFirmwareVerified = metadata.isValid
             )
             repository.updateBootConfig(updated)
             showUserMessage(metadata.statusMessage)
+            runDiagnostics()
         }
     }
 
