@@ -58,6 +58,11 @@ class TegraGpuEmulator {
         // Forward controller inputs directly into Maxwell GPFIFO input registers
     }
 
+    private var cachedBitmap: Bitmap? = null
+    private var cachedCanvas: Canvas? = null
+    private var cachedWidth: Int = 0
+    private var cachedHeight: Int = 0
+
     /**
      * Renders the VRAM Framebuffer and executes the Maxwell 3D command processor pipeline & authentic hardware rendering.
      */
@@ -74,8 +79,16 @@ class TegraGpuEmulator {
         val width = if (isDocked) 1920 else 1280
         val height = if (isDocked) 1080 else 720
 
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
+        var bitmap = cachedBitmap
+        var canvas = cachedCanvas
+        if (bitmap == null || canvas == null || cachedWidth != width || cachedHeight != height || bitmap.isRecycled) {
+            bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            canvas = Canvas(bitmap)
+            cachedBitmap = bitmap
+            cachedCanvas = canvas
+            cachedWidth = width
+            cachedHeight = height
+        }
 
         vramAllocatedMb = if (isDocked) 1536f else 1024f
         vulkanPipelineBound = if (isDocked) "VK_PIPELINE_TEGRA_MAXWELL_3D_DOCK" else "VK_PIPELINE_TEGRA_MAXWELL_3D_HANDHELD"
@@ -105,13 +118,6 @@ class TegraGpuEmulator {
             isDocked = isDocked,
             input = input
         )
-
-        // 3. Flush ARGB Pixels into Guest VRAM Framebuffer memory at 0x9000000000
-        val sampleSize = (width * height).coerceAtMost(1000)
-        for (i in 0 until sampleSize step 10) {
-            val pixel = bitmap.getPixel(i % width, (i / width) % height)
-            memory.write32(GuestMemory.VRAM_BASE + (i * 4), pixel)
-        }
 
         return bitmap
     }

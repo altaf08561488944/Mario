@@ -77,11 +77,11 @@ class VirtualStorageManager(private val context: Context) {
                 val name = file.name
                 val ext = file.extension.lowercase()
                 val type = when (ext) {
-                    "nsp", "xci" -> "GAME"
+                    "nsp", "xci", "nsz", "xcz" -> "GAME"
                     "nro", "nso" -> "HOMEBREW"
                     "sup" -> "SUP_CONTAINER"
+                    "zip", "7z" -> "ARCHIVE"
                     "keys", "dat", "bin" -> "BIOS_KEY"
-                    "zip" -> "FIRMWARE"
                     "json", "ini", "cfg" -> "CONFIG"
                     else -> "UNKNOWN"
                 }
@@ -100,6 +100,63 @@ class VirtualStorageManager(private val context: Context) {
                     )
                 )
             }
+        }
+    }
+
+    /**
+     * Imports a source file into virtual storage (MyFolder), placing it in the
+     * appropriate subdirectory based on its file extension.
+     *
+     * If deleteOriginalAfter is true, safely deletes the source file from the original
+     * downloads/storage location after copying and verifying size to free up physical space.
+     */
+    fun importFileToVirtualStorage(sourceFile: File, deleteOriginalAfter: Boolean = false): File {
+        if (!sourceFile.exists()) return sourceFile
+        val rootDir = getStorageDir()
+        val ext = sourceFile.extension.lowercase()
+        val subDirName = when (ext) {
+            "nsp", "xci", "nsz", "xcz" -> "Games"
+            "nro", "nso" -> "Homebrew"
+            "sup" -> "SUP_Containers"
+            "zip", "7z" -> "Archives"
+            "keys", "dat" -> "Backups"
+            else -> "Games"
+        }
+        val targetDir = File(rootDir, subDirName).apply { mkdirs() }
+        val targetFile = File(targetDir, sourceFile.name)
+
+        if (sourceFile.absolutePath != targetFile.absolutePath) {
+            sourceFile.inputStream().use { input ->
+                targetFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            if (deleteOriginalAfter && targetFile.exists() && targetFile.length() == sourceFile.length()) {
+                try {
+                    sourceFile.delete()
+                } catch (e: Exception) {
+                    // Ignore deletion failure if read-only
+                }
+            }
+        }
+
+        return targetFile
+    }
+
+    /**
+     * Deletes the original downloaded file from storage if the virtual copy exists.
+     */
+    fun deleteOriginalDownloadFile(originalFilePath: String): Boolean {
+        return try {
+            val file = File(originalFilePath)
+            if (file.exists() && file.isFile) {
+                file.delete()
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            false
         }
     }
 }

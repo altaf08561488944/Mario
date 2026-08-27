@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Games
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
@@ -38,6 +39,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.entity.VirtualCartridgeEntity
+import com.example.ui.components.SwitchFilePickerDialog
 import com.example.ui.theme.NeonBlue
 import com.example.ui.theme.NeonGreen
 import com.example.ui.theme.NeonRed
@@ -56,6 +62,7 @@ import com.example.ui.theme.NeonYellow
 import com.example.ui.theme.SurfaceBorder
 import com.example.ui.theme.SurfaceDark
 import com.example.ui.theme.SurfaceVariantDark
+import java.io.File
 
 @Composable
 fun CartridgeLibraryScreen(
@@ -64,8 +71,12 @@ fun CartridgeLibraryScreen(
     onDeleteCartridge: (String) -> Unit,
     onGoToMyFolder: () -> Unit,
     onGoToSaveStates: (() -> Unit)? = null,
-    onScanDevice: () -> Unit = {}
+    onScanDevice: () -> Unit = {},
+    onImportFiles: (List<File>) -> Unit = {},
+    onDirectLaunchFile: (File) -> Unit = {}
 ) {
+    var showFilePicker by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -83,63 +94,90 @@ fun CartridgeLibraryScreen(
                     )
                 )
                 .border(1.dp, SurfaceBorder, RoundedCornerShape(20.dp))
-                .padding(20.dp)
+                .padding(16.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Games,
-                        contentDescription = "Cartridge Library",
-                        tint = NeonRed,
-                        modifier = Modifier.size(32.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "VIRTUAL CARTRIDGE LIBRARY",
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 1.sp
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Games,
+                            contentDescription = "Cartridge Library",
+                            tint = NeonRed,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "VIRTUAL CARTRIDGE LIBRARY",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 1.sp
+                                ),
+                                color = Color.White
+                            )
+                            Text(
+                                text = "${cartridges.size} Virtual Cartridges Registered",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = NeonGreen
+                            )
+                        }
+                    }
+
+                    if (onGoToSaveStates != null) {
+                        OutlinedButton(
+                            onClick = onGoToSaveStates,
+                            shape = RoundedCornerShape(12.dp),
+                            border = ButtonDefaults.outlinedButtonBorder.copy(
+                                brush = Brush.horizontalGradient(listOf(NeonBlue, NeonGreen))
                             ),
-                            color = Color.White
-                        )
-                        Text(
-                            text = "${cartridges.size} Virtual Cartridges Registered",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = NeonGreen
-                        )
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Icon(Icons.Default.Save, contentDescription = null, tint = NeonBlue, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Save States", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
 
-                if (onGoToSaveStates != null) {
-                    OutlinedButton(
-                        onClick = onGoToSaveStates,
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Actions Bar: Browse Local Storage & Scan Device
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { showFilePicker = true },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed),
                         shape = RoundedCornerShape(12.dp),
-                        border = ButtonDefaults.outlinedButtonBorder.copy(
-                            brush = Brush.horizontalGradient(listOf(NeonBlue, NeonGreen))
-                        )
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(36.dp)
+                            .testTag("browse_switch_files_button")
                     ) {
-                        Icon(Icons.Default.Save, contentDescription = null, tint = NeonBlue, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Save States", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Browse Games (.nsp / .nro)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
-                    
-                    Spacer(modifier = Modifier.width(8.dp))
-                    
+
                     Button(
                         onClick = onScanDevice,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariantDark),
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.height(32.dp).border(
-                            1.dp,
-                            Brush.horizontalGradient(listOf(NeonBlue, NeonGreen)),
-                            RoundedCornerShape(12.dp)
-                        )
+                        modifier = Modifier
+                            .height(36.dp)
+                            .border(
+                                1.dp,
+                                Brush.horizontalGradient(listOf(NeonBlue, NeonGreen)),
+                                RoundedCornerShape(12.dp)
+                            )
                     ) {
                         Icon(Icons.Default.Search, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
@@ -178,17 +216,27 @@ fun CartridgeLibraryScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Go to 'My Folder', select a game file (.nsp or .nro) and choose 'CONVERT TO CARTRIDGE' to build a virtual cartridge.\n\nNote: .xci commercial format support is Coming Soon!",
+                        text = "Browse your device storage to pick game files (.nsp or .nro) or convert games in 'My Folder' into Virtual Cartridges.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                     Spacer(modifier = Modifier.height(20.dp))
-                    Button(
-                        onClick = onGoToMyFolder,
-                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed)
-                    ) {
-                        Text("GO TO MY FOLDER", fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { showFilePicker = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black)
+                        ) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("BROWSE LOCAL FILES", fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = onGoToMyFolder
+                        ) {
+                            Text("MY FOLDER", fontWeight = FontWeight.Bold, color = Color.White)
+                        }
                     }
                 }
             }
@@ -206,6 +254,21 @@ fun CartridgeLibraryScreen(
                 }
             }
         }
+    }
+
+    // Switch File Picker Sheet / Dialog
+    if (showFilePicker) {
+        SwitchFilePickerDialog(
+            onDismiss = { showFilePicker = false },
+            onImportFilesToLibrary = { files ->
+                showFilePicker = false
+                onImportFiles(files)
+            },
+            onDirectLaunch = { file ->
+                showFilePicker = false
+                onDirectLaunchFile(file)
+            }
+        )
     }
 }
 

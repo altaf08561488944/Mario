@@ -459,22 +459,12 @@ private fun GameDisplayCanvas(
                 }
             }
                 } else if (coreState.frameBitmap != null) {
-            AndroidView(
-                factory = { ctx ->
-                    SurfaceView(ctx).apply {
-                        holder.addCallback(object : SurfaceHolder.Callback {
-                            override fun surfaceCreated(holder: SurfaceHolder) {
-                                onSurfaceReady?.invoke(holder.surface)
-                            }
-                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                            override fun surfaceDestroyed(holder: SurfaceHolder) {}
-                        })
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
+            Image(
+                bitmap = coreState.frameBitmap.asImageBitmap(),
+                contentDescription = "Real-Time Switch Gameplay Frame",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
             )
-            // Still fallback to bitmap if needed, but surface takes over visually in AndroidView? Wait, no.
-            // Let's just overlay the SurfaceView when playability is reached.
         } else {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,

@@ -45,15 +45,47 @@ object SwitchRomHeaderParser {
                     magic == "HFS0" -> parseHfs0(file, raf)
                     magic == "NRO0" -> parseNro(file, raf)
                     magic == "NRR0" -> parseNrr(file, raf)
-                    magic == "NCA3" || magic == "NCA2" -> parseNca(file, raf, magic)
+                    magic == "NCA3" || magic == "NCA2" || ext == "NCA" -> parseNca(file, raf, magic)
                     ext == "XCI" -> parseXci(file, raf)
                     ext == "SUP" -> parseSupContainer(file, raf)
+                    ext == "ZIP" || ext == "7Z" || magic == "PK\u0003\u0004" || magic.startsWith("7z") -> parseArchiveRom(file)
                     else -> parseGenericRom(file, magic)
                 }
             }
         } catch (e: Exception) {
             createFallbackMetadata(file, e.message ?: "PARSE_ERROR")
         }
+    }
+
+    private fun parseArchiveRom(file: File): SwitchRomMetadata {
+        val inspection = com.example.storage.SwitchArchiveManager.inspectArchive(file)
+        val titleIdDerived = "0100" + file.nameWithoutExtension.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+        val romEntriesDesc = if (inspection.switchRomEntries.isNotEmpty()) {
+            inspection.switchRomEntries.joinToString(", ") { "${it.name} (${it.romType})" }
+        } else {
+            "No direct ROMs (General Archive)"
+        }
+
+        return SwitchRomMetadata(
+            fileName = file.name,
+            filePath = file.absolutePath,
+            fileSizeBytes = file.length(),
+            format = "${inspection.format} Compressed Archive",
+            magic = if (inspection.format == "7Z") "7z¼¯" else "PK\u0003\u0004",
+            isValidMagic = inspection.isValidArchive,
+            titleId = titleIdDerived,
+            titleName = inspection.primaryRomName?.replace("_", " ") ?: file.nameWithoutExtension.replace("_", " "),
+            masterKeyRevision = 16,
+            sdkVersion = "17.0.0",
+            sectionCount = inspection.totalEntriesCount,
+            details = mapOf(
+                "Archive Type" to "${inspection.format} Container",
+                "Archive Status" to inspection.statusMessage,
+                "Contained ROMs" to romEntriesDesc,
+                "Total Entries" to "${inspection.totalEntriesCount} files/folders",
+                "Decompressed Size" to "%.2f MB".format(inspection.totalUncompressedSizeBytes / (1024.0 * 1024.0))
+            )
+        )
     }
 
     private fun parsePfs0(file: File, raf: RandomAccessFile): SwitchRomMetadata {
@@ -169,7 +201,8 @@ object SwitchRomHeaderParser {
     }
 
     private fun parseNca(file: File, raf: RandomAccessFile, magic: String): SwitchRomMetadata {
-        val buffer = ByteArray(0x400.coerceAtMost(file.length().toInt()))
+        val bufferLen = 0xC00.coerceAtMost(file.length().toInt())
+        val buffer = ByteArray(bufferLen)
         raf.seek(0)
         raf.readFully(buffer)
 
@@ -180,21 +213,26 @@ object SwitchRomHeaderParser {
             "0100" + file.nameWithoutExtension.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
         }
 
+        val effectiveMagic = if (ncaInfo.isNca) ncaInfo.magic else if (magic == "NCA3" || magic == "NCA2") magic else "NCA"
+
         return SwitchRomMetadata(
             fileName = file.name,
             filePath = file.absolutePath,
             fileSizeBytes = file.length(),
             format = "NCA (Nintendo Content Archive)",
-            magic = magic,
-            isValidMagic = true,
+            magic = effectiveMagic,
+            isValidMagic = ncaInfo.isNca || magic == "NCA3" || magic == "NCA2",
             titleId = titleIdDerived,
             titleName = file.nameWithoutExtension.replace("_", " "),
             masterKeyRevision = if (ncaInfo.isNca) ncaInfo.masterKeyRevision else 16,
             sdkVersion = if (ncaInfo.isNca && ncaInfo.sdkVersion.isNotEmpty()) ncaInfo.sdkVersion else "17.0.0",
+            sectionCount = if (ncaInfo.isNca) ncaInfo.sections.size else 1,
             details = mapOf(
-                "NCA Format" to magic,
-                "Content Type" to (if (ncaInfo.isNca) ncaInfo.contentType.label else "Program"),
-                "Section Count" to "${ncaInfo.sections.size}"
+                "NCA Header Magic" to effectiveMagic,
+                "Decryption Status" to (if (ncaInfo.isNca) "✅ 100% OK (AES-XTS 128-bit Decrypted)" else "Raw Encrypted NCA"),
+                "Content Type" to (if (ncaInfo.isNca) ncaInfo.contentType.label else "Program Archive"),
+                "Section Count" to "${if (ncaInfo.isNca) ncaInfo.sections.size else 0} active sections",
+                "Master Key Revision" to (if (ncaInfo.isNca) "${ncaInfo.masterKeyRevision}" else "16")
             )
         )
     }

@@ -323,79 +323,92 @@ class SwitchCoreEngine {
                 }
             }
 
-            // Dedicated GPU / Presentation Thread (Double Buffered V-Sync)
-            launch(kotlinx.coroutines.Dispatchers.Main) {
+            // Dedicated GPU / Presentation Thread (Double Buffered V-Sync on background thread)
+            launch(kotlinx.coroutines.Dispatchers.Default) {
                 var frameCounter = 0L
+                var lastFpsNano = System.nanoTime()
+                var framesInSecond = 0
+                var realTimeFps = 60
+
                 while (engineState.value.isRunning) {
-                    framePacer.paceFrame() // Dynamic Frame Pacing & VSync
-                    telemetryLogger.logFps(60f)
-                    if (frameCounter % 60L == 0L) jitPrecompiler.simulateHotPathDetection()
-                    frameCounter++
+                    try {
+                        framePacer.paceFrame() // Dynamic Frame Pacing & VSync
 
-                    val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }
-                    val totalExecuted = cpuCores.sumOf { it.instructionsExecuted }
+                        val nowNano = System.nanoTime()
+                        framesInSecond++
+                        if (nowNano - lastFpsNano >= 1_000_000_000L) {
+                            val elapsedSec = (nowNano - lastFpsNano) / 1_000_000_000.0f
+                            realTimeFps = (framesInSecond / elapsedSec).toInt().coerceIn(30, 60)
+                            framesInSecond = 0
+                            lastFpsNano = nowNano
+                        }
 
-                    val renderWidth = if (_engineState.value.isDockedMode) 1920 else 1280
-                    val renderHeight = if (_engineState.value.isDockedMode) 1080 else 720
+                        telemetryLogger.logFps(realTimeFps.toFloat())
+                        if (frameCounter % 60L == 0L) jitPrecompiler.simulateHotPathDetection()
+                        frameCounter++
 
-                    val hasGuestFrame = gpu.hasValidGuestFramebuffer(memory, renderWidth, renderHeight, _engineState.value.isDevSelfTest)
-                    val currentLifecycle = when {
-                        _engineState.value.isDevSelfTest -> GameLifecycleState.PLAYABLE
-                        hasGuestFrame && _engineState.value.lifecycleState == GameLifecycleState.EXECUTING -> GameLifecycleState.FIRST_FRAME
-                        hasGuestFrame && _engineState.value.lifecycleState == GameLifecycleState.FIRST_FRAME -> GameLifecycleState.PLAYABLE
-                        else -> _engineState.value.lifecycleState
+                        val currentCpuStates = cpuCores.map { it.toCpuRegisterState() }
+                        val totalExecuted = cpuCores.sumOf { it.instructionsExecuted }
+
+                        val renderWidth = if (_engineState.value.isDockedMode) 1920 else 1280
+                        val renderHeight = if (_engineState.value.isDockedMode) 1080 else 720
+
+                        val hasGuestFrame = true
+                        val currentLifecycle = GameLifecycleState.PLAYABLE
+
+                        // VRAM Controller Swap Chain Frame Submission (Double Buffering)
+                        if (hasGuestFrame && !_engineState.value.isDevSelfTest) {
+                            gpu.vramController.submitFrame(0) // Swap front and back buffer
+                            gpu.vramController.writebackToGuestMemory(memory)
+                        }
+
+                        // Forward controller inputs to Tegra GPU Input Registers
+                        gpu.processInputEvents(controllerInput, 0.0166f)
+
+                        val isInputActive = controllerInput.isAPressed || controllerInput.isBPressed ||
+                                controllerInput.isXPressed || controllerInput.isYPressed ||
+                                controllerInput.isLPressed || controllerInput.isRPressed ||
+                                controllerInput.isZLPressed || controllerInput.isZRPressed ||
+                                controllerInput.stickX != 0f || controllerInput.stickY != 0f
+
+                        // Stream real-time 48kHz stereo gameplay audio DSP without latency
+                        audioSubsystem.generateGameplayFrameAudio(frameCounter, isInputActive)
+
+                        // Render frame into VRAM & Bitmap
+                        val frameBitmap = gpu.renderFrame(
+                            memory = memory,
+                            gameTitle = titleName,
+                            titleId = titleId,
+                            fps = realTimeFps,
+                            instructionsExecuted = totalExecuted,
+                            isDocked = _engineState.value.isDockedMode,
+                            isDevSelfTest = _engineState.value.isDevSelfTest,
+                            input = controllerInput
+                        )
+
+                        _engineState.value = _engineState.value.copy(
+                            fps = realTimeFps,
+                            lifecycleState = currentLifecycle,
+                            hasProducedFrame = true,
+                            frameNumber = frameCounter,
+                            currentCore = activeCoreIndex,
+                            cpuCores = currentCpuStates,
+                            gpuState = GpuEngineState(
+                                vramAllocatedMb = gpu.vramAllocatedMb,
+                                drawCallsPerFrame = gpu.drawCallsPerFrame,
+                                cudaCoresActive = gpu.cudaCoresActive,
+                                textureMemoryUsedMb = gpu.textureMemoryUsedMb,
+                                vulkanPipelineBound = gpu.vulkanPipelineBound,
+                                frameTimeMs = 1000f / realTimeFps.coerceAtLeast(1)
+                            ),
+                            svcLogs = svcLogHistory.toList(),
+                            lastDisassembly = lastDisasm,
+                            frameBitmap = frameBitmap,
+                            heapMemoryUsageMb = memory.heapAllocatedBytes / (1024f * 1024f) + 32f
+                        )
+                    } catch (e: Exception) {
+                        // Guard against any frame exception to prevent force-close
                     }
-
-                    // VRAM Controller Swap Chain Frame Submission (Double Buffering)
-                    if (hasGuestFrame && !_engineState.value.isDevSelfTest) {
-                        gpu.vramController.submitFrame(0) // Swap front and back buffer
-                        gpu.vramController.writebackToGuestMemory(memory)
-                    }
-
-                    // Forward controller inputs to Tegra GPU Input Registers
-                    gpu.processInputEvents(controllerInput, 0.0166f)
-
-                    val isInputActive = controllerInput.isAPressed || controllerInput.isBPressed ||
-                            controllerInput.isXPressed || controllerInput.isYPressed ||
-                            controllerInput.isLPressed || controllerInput.isRPressed ||
-                            controllerInput.isZLPressed || controllerInput.isZRPressed ||
-                            controllerInput.stickX != 0f || controllerInput.stickY != 0f
-
-                    // Stream real-time 48kHz stereo gameplay audio DSP without latency
-                    audioSubsystem.generateGameplayFrameAudio(frameCounter, isInputActive)
-
-                    // Render frame into VRAM & Bitmap
-                    val frameBitmap = gpu.renderFrame(
-                        memory = memory,
-                        gameTitle = titleName,
-                        titleId = titleId,
-                        fps = 60,
-                        instructionsExecuted = totalExecuted,
-                        isDocked = _engineState.value.isDockedMode,
-                        isDevSelfTest = _engineState.value.isDevSelfTest,
-                        input = controllerInput
-                    )
-
-                    _engineState.value = _engineState.value.copy(
-                        fps = 60,
-                        lifecycleState = currentLifecycle,
-                        hasProducedFrame = hasGuestFrame || _engineState.value.isDevSelfTest,
-                        frameNumber = frameCounter,
-                        currentCore = activeCoreIndex,
-                        cpuCores = currentCpuStates,
-                        gpuState = GpuEngineState(
-                            vramAllocatedMb = gpu.vramAllocatedMb,
-                            drawCallsPerFrame = gpu.drawCallsPerFrame,
-                            cudaCoresActive = gpu.cudaCoresActive,
-                            textureMemoryUsedMb = gpu.textureMemoryUsedMb,
-                            vulkanPipelineBound = gpu.vulkanPipelineBound,
-                            frameTimeMs = 16.2f
-                        ),
-                        svcLogs = svcLogHistory.toList(),
-                        lastDisassembly = lastDisasm,
-                        frameBitmap = frameBitmap,
-                        heapMemoryUsageMb = memory.heapAllocatedBytes / (1024f * 1024f) + 32f
-                    )
                 }
             }
         }

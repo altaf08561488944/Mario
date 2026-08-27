@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <vector>
 #include <unordered_map>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+#include <chrono>
 #include "memory_mmu.h"
 
 #define LOG_TAG "SwtcCpuEngine"
@@ -12,14 +16,110 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 // ======================================================================
-// SWTC NOOS - NATIVE ARM64 CPU ENGINE (FORMAL DECODER)
+// SWTC NOOS - NATIVE ARM64 CPU ENGINE & INSTRUCTION DECODER
 // ======================================================================
 
 struct GuestCpuState {
     uint64_t registers[31];
     uint64_t sp;
     uint64_t pc;
-    uint32_t pstate; // NZCV, etc.
+    uint32_t pstate; // Bit 31: N, Bit 30: Z, Bit 29: C, Bit 28: V
+    uint64_t tpidr_el0;
+    uint64_t tpidrro_el0;
+    uint32_t fpcr;
+    uint32_t fpsr;
+    uint64_t cntfrq_el0;
+    
+    // 32 x 128-bit Vector / Floating-point registers
+    union VectorReg {
+        struct {
+            uint64_t low;
+            uint64_t high;
+        } u64_pair;
+        uint8_t  u8[16];
+        int8_t   s8[16];
+        uint16_t u16[8];
+        int16_t  s16[8];
+        uint32_t u32[4];
+        int32_t  s32[4];
+        uint64_t u64[2];
+        int64_t  s64[2];
+        float    f32[4];
+        double   f64[2];
+    } v[32];
+
+    inline uint64_t getReg(uint32_t idx) const {
+        return (idx == 31) ? 0ULL : registers[idx];
+    }
+
+    inline void setReg(uint32_t idx, uint64_t val) {
+        if (idx != 31) registers[idx] = val;
+    }
+
+    inline uint64_t getSP() const { return sp; }
+    inline void setSP(uint64_t val) { sp = val; }
+
+    inline float getFloatS(uint32_t idx) const { return v[idx & 31].f32[0]; }
+    inline void setFloatS(uint32_t idx, float val) {
+        v[idx & 31].u64_pair.low = 0;
+        v[idx & 31].u64_pair.high = 0;
+        v[idx & 31].f32[0] = val;
+    }
+
+    inline double getFloatD(uint32_t idx) const { return v[idx & 31].f64[0]; }
+    inline void setFloatD(uint32_t idx, double val) {
+        v[idx & 31].u64_pair.high = 0;
+        v[idx & 31].f64[0] = val;
+    }
+
+    inline bool getN() const { return (pstate & (1U << 31)) != 0; }
+    inline bool getZ() const { return (pstate & (1U << 30)) != 0; }
+    inline bool getC() const { return (pstate & (1U << 29)) != 0; }
+    inline bool getV() const { return (pstate & (1U << 28)) != 0; }
+
+    inline void setNZCV(bool n, bool z, bool c, bool v) {
+        pstate = (n ? (1U << 31) : 0) |
+                 (z ? (1U << 30) : 0) |
+                 (c ? (1U << 29) : 0) |
+                 (v ? (1U << 28) : 0);
+    }
+
+    inline void updateNZ32(uint32_t val) {
+        bool n = (val & 0x80000000U) != 0;
+        bool z = (val == 0);
+        pstate = (pstate & 0x3FFFFFFFU) | (n ? (1U << 31) : 0) | (z ? (1U << 30) : 0);
+    }
+
+    inline void updateNZ64(uint64_t val) {
+        bool n = (val & 0x8000000000000000ULL) != 0;
+        bool z = (val == 0);
+        pstate = (pstate & 0x3FFFFFFFU) | (n ? (1U << 31) : 0) | (z ? (1U << 30) : 0);
+    }
+
+    bool evaluateCondition(uint32_t cond) const {
+        bool n = getN();
+        bool z = getZ();
+        bool c = getC();
+        bool v = getV();
+
+        switch (cond & 0x0E) {
+            case 0x00: return z;                       // EQ / NE
+            case 0x02: return c;                       // CS / CC
+            case 0x04: return n;                       // MI / PL
+            case 0x06: return v;                       // VS / VC
+            case 0x08: return c && !z;                 // HI / LS
+            case 0x0A: return n == v;                  // GE / LT
+            case 0x0C: return !z && (n == v);          // GT / LE
+            case 0x0E: return true;                    // AL / NV
+            default: return true;
+        }
+    }
+
+    bool testCondition(uint32_t cond) const {
+        bool result = evaluateCondition(cond);
+        if (cond & 1) result = !result;
+        return result;
+    }
 };
 
 static GuestCpuState cpuState;
@@ -263,7 +363,7 @@ public:
 class AArch64Decoder {
 public:
     static void DecodeAndExecute(uint32_t instruction) {
-        // AArch64 Main Encoding Space
+        // AArch64 Main Encoding Space (Top-level table dispatch)
         uint32_t op0 = (instruction >> 25) & 0xF;
         
         switch (op0) {
@@ -303,131 +403,1030 @@ public:
 
 private:
     static void ExecuteUnallocated(uint32_t instr) {
-        // Unallocated or unrecognized instruction
-        cpuState.pc += 4;
-    }
-    
-    static void ExecuteDataProcessingImmediate(uint32_t instr) {
-        // e.g., ADD (immediate), SUB (immediate), ORR (immediate)
-        uint32_t op0 = (instr >> 23) & 0x7;
-        uint32_t rd = instr & 0x1F;
-        uint32_t rn = (instr >> 5) & 0x1F;
-        
-        if (op0 == 0b010) { // Add/subtract (immediate)
-            uint32_t shift = (instr >> 22) & 0x1;
-            uint32_t imm12 = (instr >> 10) & 0xFFF;
-            uint32_t op = (instr >> 30) & 0x1; // 0=ADD, 1=SUB
-            uint64_t imm = shift ? (imm12 << 12) : imm12;
-            
-            uint64_t op1 = (rn == 31) ? cpuState.sp : cpuState.registers[rn];
-            uint64_t result = (op == 0) ? (op1 + imm) : (op1 - imm);
-            
-            if (rd == 31) {
-                cpuState.sp = result;
-            } else {
-                cpuState.registers[rd] = result;
-            }
-        }
         cpuState.pc += 4;
     }
 
+    static uint64_t ShiftValue(uint64_t val, uint32_t shiftType, uint32_t amount, bool is64) {
+        if (amount == 0) return is64 ? val : (val & 0xFFFFFFFFULL);
+        uint32_t mask = is64 ? 63 : 31;
+        amount &= mask;
+        if (!is64) val &= 0xFFFFFFFFULL;
+
+        switch (shiftType & 3) {
+            case 0: // LSL
+                return is64 ? (val << amount) : ((val << amount) & 0xFFFFFFFFULL);
+            case 1: // LSR
+                return is64 ? (val >> amount) : ((val & 0xFFFFFFFFULL) >> amount);
+            case 2: { // ASR
+                if (is64) {
+                    return static_cast<uint64_t>(static_cast<int64_t>(val) >> amount);
+                } else {
+                    return static_cast<uint32_t>(static_cast<int32_t>(val) >> amount);
+                }
+            }
+            case 3: { // ROR
+                if (is64) {
+                    return (val >> amount) | (val << (64 - amount));
+                } else {
+                    uint32_t v32 = static_cast<uint32_t>(val);
+                    return (v32 >> amount) | (v32 << (32 - amount));
+                }
+            }
+        }
+        return val;
+    }
+
+    static uint64_t ExtendValue(uint64_t val, uint32_t option, uint32_t shift) {
+        val <<= (shift & 7);
+        switch (option & 7) {
+            case 0: return static_cast<uint8_t>(val);                           // UXTB
+            case 1: return static_cast<uint16_t>(val);                          // UXTH
+            case 2: return static_cast<uint32_t>(val);                          // UXTW
+            case 3: return val;                                                 // UXTX
+            case 4: return static_cast<uint64_t>(static_cast<int8_t>(val));     // SXTB
+            case 5: return static_cast<uint64_t>(static_cast<int16_t>(val));    // SXTH
+            case 6: return static_cast<uint64_t>(static_cast<int32_t>(val));    // SXTW
+            case 7: return static_cast<uint64_t>(static_cast<int64_t>(val));    // SXTX
+        }
+        return val;
+    }
+
+    // Decode AArch64 logical bitmask immediate (N, imms, immr)
+    static bool DecodeBitmaskImmediate(uint32_t N, uint32_t imms, uint32_t immr, bool is64, uint64_t& out_wmask) {
+        uint32_t len = 31 - __builtin_clz((N << 6) | (~imms & 0x3F));
+        if (len < 1) return false;
+
+        uint32_t size = 1 << len;
+        uint32_t R = immr & (size - 1);
+        uint32_t S = imms & (size - 1);
+
+        if (S >= size - 1) return false;
+
+        uint64_t pattern = (1ULL << (S + 1)) - 1;
+        // ROR pattern within 'size' bits
+        pattern = (pattern >> R) | ((pattern << (size - R)) & ((size == 64) ? ~0ULL : ((1ULL << size) - 1)));
+
+        // Replicate pattern across 64 bits
+        out_wmask = 0;
+        for (uint32_t i = 0; i < 64; i += size) {
+            out_wmask |= (pattern << i);
+        }
+
+        if (!is64) out_wmask &= 0xFFFFFFFFULL;
+        return true;
+    }
+
+    // =========================================================================
+    // 1. DATA PROCESSING - IMMEDIATE
+    // =========================================================================
+    static void ExecuteDataProcessingImmediate(uint32_t instr) {
+        uint32_t op0 = (instr >> 23) & 0x7;
+        uint32_t sf = (instr >> 31) & 0x1;
+        uint32_t rd = instr & 0x1F;
+        uint32_t rn = (instr >> 5) & 0x1F;
+
+        // PC-rel addressing (ADR, ADRP)
+        if (op0 == 0b000) {
+            uint32_t op = (instr >> 31) & 1;
+            uint32_t immlo = (instr >> 29) & 3;
+            uint32_t immhi = (instr >> 5) & 0x7FFFF;
+            int64_t imm21 = static_cast<int64_t>((immhi << 2) | immlo);
+            if (imm21 & 0x100000) imm21 |= 0xFFFFFFFFFFE00000ULL; // Sign extend
+
+            uint64_t base = cpuState.pc;
+            if (op == 1) { // ADRP
+                base &= ~0xFFFULL;
+                imm21 <<= 12;
+            }
+            if (rd != 31) {
+                cpuState.registers[rd] = base + imm21;
+            }
+        }
+        // Add/subtract (immediate)
+        else if (op0 == 0b010) {
+            uint32_t shift = (instr >> 22) & 0x1;
+            uint32_t imm12 = (instr >> 10) & 0xFFF;
+            uint32_t op = (instr >> 30) & 0x1;  // 0=ADD, 1=SUB
+            uint32_t S = (instr >> 29) & 0x1;   // Set flags
+            uint64_t imm = shift ? (static_cast<uint64_t>(imm12) << 12) : imm12;
+
+            uint64_t op1 = (rn == 31) ? cpuState.sp : cpuState.registers[rn];
+            if (!sf) op1 &= 0xFFFFFFFFULL;
+
+            uint64_t result;
+            if (op == 0) { // ADD / ADDS
+                result = op1 + imm;
+                if (S) {
+                    if (sf) {
+                        bool c = (result < op1);
+                        bool v = (~(op1 ^ imm) & (op1 ^ result) & 0x8000000000000000ULL) != 0;
+                        cpuState.setNZCV((result & 0x8000000000000000ULL) != 0, result == 0, c, v);
+                    } else {
+                        uint32_t r32 = static_cast<uint32_t>(result);
+                        uint32_t o1_32 = static_cast<uint32_t>(op1);
+                        uint32_t imm_32 = static_cast<uint32_t>(imm);
+                        bool c = (r32 < o1_32);
+                        bool v = (~(o1_32 ^ imm_32) & (o1_32 ^ r32) & 0x80000000U) != 0;
+                        cpuState.setNZCV((r32 & 0x80000000U) != 0, r32 == 0, c, v);
+                    }
+                }
+            } else { // SUB / SUBS
+                result = op1 - imm;
+                if (S) {
+                    if (sf) {
+                        bool c = (op1 >= imm);
+                        bool v = ((op1 ^ imm) & (op1 ^ result) & 0x8000000000000000ULL) != 0;
+                        cpuState.setNZCV((result & 0x8000000000000000ULL) != 0, result == 0, c, v);
+                    } else {
+                        uint32_t r32 = static_cast<uint32_t>(result);
+                        uint32_t o1_32 = static_cast<uint32_t>(op1);
+                        uint32_t imm_32 = static_cast<uint32_t>(imm);
+                        bool c = (o1_32 >= imm_32);
+                        bool v = ((o1_32 ^ imm_32) & (o1_32 ^ r32) & 0x80000000U) != 0;
+                        cpuState.setNZCV((r32 & 0x80000000U) != 0, r32 == 0, c, v);
+                    }
+                }
+            }
+
+            if (!sf) result &= 0xFFFFFFFFULL;
+
+            if (rd == 31 && !S) {
+                cpuState.sp = result;
+            } else if (rd != 31) {
+                cpuState.registers[rd] = result;
+            }
+        }
+        // Logical (immediate)
+        else if (op0 == 0b100 && ((instr >> 29) & 0x3) != 0b11) {
+            uint32_t opc = (instr >> 29) & 0x3;
+            uint32_t N = (instr >> 22) & 1;
+            uint32_t immr = (instr >> 16) & 0x3F;
+            uint32_t imms = (instr >> 10) & 0x3F;
+
+            uint64_t wmask = 0;
+            if (DecodeBitmaskImmediate(N, imms, immr, sf != 0, wmask)) {
+                uint64_t src = (rn == 31) ? (opc == 0b11 ? 0 : cpuState.sp) : cpuState.registers[rn];
+                if (!sf) src &= 0xFFFFFFFFULL;
+
+                uint64_t res = 0;
+                switch (opc) {
+                    case 0b00: res = src & wmask; break;  // AND
+                    case 0b01: res = src | wmask; break;  // ORR
+                    case 0b10: res = src ^ wmask; break;  // EOR
+                    case 0b11: res = src & wmask; break;  // ANDS
+                }
+
+                if (opc == 0b11) {
+                    if (sf) cpuState.updateNZ64(res);
+                    else cpuState.updateNZ32(static_cast<uint32_t>(res));
+                }
+
+                if (!sf) res &= 0xFFFFFFFFULL;
+                if (rd == 31 && opc != 0b11) cpuState.sp = res;
+                else if (rd != 31) cpuState.registers[rd] = res;
+            }
+        }
+        // Move wide (immediate): MOVZ, MOVN, MOVK
+        else if (op0 == 0b101) {
+            uint32_t opc = (instr >> 29) & 0x3;
+            uint32_t hw = (instr >> 21) & 0x3;
+            uint64_t imm16 = (instr >> 5) & 0xFFFF;
+            uint32_t shift = hw * 16;
+            uint64_t imm = imm16 << shift;
+
+            if (rd != 31) {
+                if (opc == 0b00) { // MOVN
+                    uint64_t res = ~imm;
+                    if (!sf) res &= 0xFFFFFFFFULL;
+                    cpuState.registers[rd] = res;
+                } else if (opc == 0b10) { // MOVZ
+                    cpuState.registers[rd] = imm;
+                } else if (opc == 0b11) { // MOVK
+                    uint64_t current = cpuState.registers[rd];
+                    uint64_t mask = ~(0xFFFFULL << shift);
+                    if (!sf) {
+                        current &= 0xFFFFFFFFULL;
+                        mask &= 0xFFFFFFFFULL;
+                    }
+                    cpuState.registers[rd] = (current & mask) | imm;
+                }
+            }
+        }
+        // Bitfield (UBFM, SBFM, BFM)
+        else if (op0 == 0b110) {
+            uint32_t opc = (instr >> 29) & 0x3;
+            uint32_t immr = (instr >> 16) & 0x3F;
+            uint32_t imms = (instr >> 10) & 0x3F;
+            uint64_t src = (rn == 31) ? 0 : cpuState.registers[rn];
+            uint32_t maxBits = sf ? 64 : 32;
+
+            if (opc == 0b10) { // UBFM (LSR, LSL, UBFX, UXTB, UXTH)
+                uint64_t res = 0;
+                if (imms >= immr) {
+                    res = (src >> immr) & ((imms - immr >= 63) ? ~0ULL : ((1ULL << (imms - immr + 1)) - 1));
+                } else {
+                    res = (src & ((1ULL << (imms + 1)) - 1)) << (maxBits - immr);
+                }
+                if (!sf) res &= 0xFFFFFFFFULL;
+                if (rd != 31) cpuState.registers[rd] = res;
+            } else if (opc == 0b00) { // SBFM (ASR, SBFX, SXTB, SXTH, SXTW)
+                uint64_t res = 0;
+                if (imms >= immr) {
+                    res = src >> immr;
+                    int width = static_cast<int>(imms - immr + 1);
+                    if (width > 0 && width < 64) {
+                        uint64_t signBit = 1ULL << (width - 1);
+                        if (res & signBit) res |= ~((1ULL << width) - 1);
+                        else res &= ((1ULL << width) - 1);
+                    }
+                } else {
+                    res = (src & ((1ULL << (imms + 1)) - 1)) << (maxBits - immr);
+                    int width = static_cast<int>(imms + 1 + (maxBits - immr));
+                    if (width > 0 && width < 64) {
+                        uint64_t signBit = 1ULL << (width - 1);
+                        if (res & signBit) res |= ~((1ULL << width) - 1);
+                        else res &= ((1ULL << width) - 1);
+                    }
+                }
+                if (!sf) res &= 0xFFFFFFFFULL;
+                if (rd != 31) cpuState.registers[rd] = res;
+            } else if (opc == 0b01) { // BFM (BFI, BFXIL)
+                uint64_t dst = (rd == 31) ? 0 : cpuState.registers[rd];
+                if (imms >= immr) {
+                    uint32_t width = imms - immr + 1;
+                    uint64_t mask = (width >= 64) ? ~0ULL : ((1ULL << width) - 1);
+                    dst = (dst & ~mask) | ((src >> immr) & mask);
+                } else {
+                    uint32_t width = imms + 1;
+                    uint32_t lsb = maxBits - immr;
+                    uint64_t mask = ((1ULL << width) - 1) << lsb;
+                    dst = (dst & ~mask) | ((src << lsb) & mask);
+                }
+                if (!sf) dst &= 0xFFFFFFFFULL;
+                if (rd != 31) cpuState.registers[rd] = dst;
+            }
+        }
+        // Extract (EXTR)
+        else if (op0 == 0b111) {
+            uint32_t rm = (instr >> 16) & 0x1F;
+            uint32_t lsb = (instr >> 10) & 0x3F;
+            uint64_t src1 = (rn == 31) ? 0 : cpuState.registers[rn];
+            uint64_t src2 = (rm == 31) ? 0 : cpuState.registers[rm];
+            uint64_t res = 0;
+
+            if (sf) {
+                if (lsb == 0) res = src2;
+                else res = (src2 >> lsb) | (src1 << (64 - lsb));
+            } else {
+                src1 &= 0xFFFFFFFFULL;
+                src2 &= 0xFFFFFFFFULL;
+                if (lsb == 0) res = src2;
+                else res = ((src2 >> lsb) | (src1 << (32 - lsb))) & 0xFFFFFFFFULL;
+            }
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+
+        cpuState.pc += 4;
+    }
+
+    // =========================================================================
+    // 2. BRANCHES, EXCEPTION GENERATION, AND SYSTEM INSTRUCTIONS
+    // =========================================================================
     static void ExecuteBranchesExceptionSystem(uint32_t instr) {
         uint32_t op0 = (instr >> 26) & 0x7;
-        if (op0 == 0b101) { // Unconditional branch (register) e.g., BR, BLR, RET
+
+        // Unconditional branch (register): BR, BLR, RET
+        if (op0 == 0b101) {
             uint32_t opc = (instr >> 21) & 0xF;
             uint32_t rn = (instr >> 5) & 0x1F;
+            uint64_t target = (rn == 31) ? cpuState.sp : cpuState.registers[rn];
+
             if (opc == 0b0010) { // RET
-                uint64_t target = cpuState.registers[rn];
                 cpuState.pc = target;
                 bp.Update(cpuState.pc - 4, target);
-                return; // PC updated
+                return;
+            } else if (opc == 0b0001) { // BLR
+                cpuState.registers[30] = cpuState.pc + 4;
+                cpuState.pc = target;
+                bp.Update(cpuState.pc - 4, target);
+                return;
+            } else if (opc == 0b0000) { // BR
+                cpuState.pc = target;
+                bp.Update(cpuState.pc - 4, target);
+                return;
             }
-        } else if (op0 == 0b000) { // Unconditional branch (immediate) e.g., B, BL
+        }
+        // Unconditional branch (immediate): B, BL
+        else if (op0 == 0b000) {
             uint32_t opc = (instr >> 31) & 0x1;
             int32_t imm26 = instr & 0x03FFFFFF;
-            // Sign extend
             if (imm26 & 0x02000000) imm26 |= 0xFC000000;
-            int64_t offset = (int64_t)imm26 * 4;
-            
+            int64_t offset = static_cast<int64_t>(imm26) * 4;
+
             if (opc == 1) { // BL
-                cpuState.registers[30] = cpuState.pc + 4; // LR
+                cpuState.registers[30] = cpuState.pc + 4;
             }
             cpuState.pc += offset;
             bp.Update(cpuState.pc - offset, cpuState.pc);
-            return; // PC updated
-        } else if (op0 == 0b100) { // Exception generation (SVC, HVC, SMC, BRK)
-            uint32_t opc = (instr >> 21) & 0x7;
-            uint32_t op2 = (instr >> 2) & 0x7;
-            uint32_t ll = instr & 0x3;
-            
-            if (opc == 0b000 && op2 == 0b000 && ll == 0b01) { // SVC
-                uint32_t imm16 = (instr >> 5) & 0xFFFF;
-                HorizonOS::getInstance().HandleSVC(imm16);
-                // PC continues to the next instruction after SVC
-            } else {
-                LOGE("Unhandled Exception Generation Instruction: 0x%08X", instr);
-            }
-        } else if (op0 == 0b010) { // Conditional branch (immediate) e.g., B.cond
+            return;
+        }
+        // Conditional branch (immediate): B.cond
+        else if (op0 == 0b010) {
+            uint32_t cond = instr & 0x0F;
             int32_t imm19 = (instr >> 5) & 0x7FFFF;
             if (imm19 & 0x40000) imm19 |= 0xFFF80000;
-            int64_t offset = (int64_t)imm19 * 4;
-            
-            // Dummy condition evaluation - assume true for now
-            bool cond_met = true; 
-            if (cond_met) {
+            int64_t offset = static_cast<int64_t>(imm19) * 4;
+
+            if (cpuState.testCondition(cond)) {
                 cpuState.pc += offset;
                 bp.Update(cpuState.pc - offset, cpuState.pc);
                 return;
             }
         }
-        cpuState.pc += 4;
-    }
+        // Compare & branch / Test & branch
+        else if (op0 == 0b001) {
+            uint32_t op1 = (instr >> 24) & 0x1F;
+            if ((op1 & 0x1E) == 0b01010) { // CBZ, CBNZ
+                uint32_t sf = (instr >> 31) & 1;
+                uint32_t op = (instr >> 24) & 1; // 0=CBZ, 1=CBNZ
+                uint32_t rt = instr & 0x1F;
+                int32_t imm19 = (instr >> 5) & 0x7FFFF;
+                if (imm19 & 0x40000) imm19 |= 0xFFF80000;
+                int64_t offset = static_cast<int64_t>(imm19) * 4;
 
-    static void ExecuteLoadsAndStores(uint32_t instr) {
-        // Simplified Load/Store Register (Unsigned Immediate)
-        uint32_t size = (instr >> 30) & 0x3;
-        uint32_t opc = (instr >> 22) & 0x3;
-        uint32_t rn = (instr >> 5) & 0x1F;
-        uint32_t rt = instr & 0x1F;
-        
-        bool isLoad = (opc & 1) != 0;
-        uint64_t address = (rn == 31) ? cpuState.sp : cpuState.registers[rn];
-        
-        // Scaled 12-bit unsigned immediate
-        uint64_t imm12 = (instr >> 10) & 0xFFF;
-        uint64_t offset = imm12 << size;
-        address += offset;
+                uint64_t val = (rt == 31) ? 0 : cpuState.registers[rt];
+                if (!sf) val &= 0xFFFFFFFFULL;
 
-        auto& mmu = SwtcMmu::getGlobalMmu();
-        
-        if (isLoad) {
-            uint64_t value = 0;
-            if (size == 0) value = mmu.read8(address);
-            else if (size == 1) value = mmu.read16(address);
-            else if (size == 2) value = mmu.read32(address);
-            else if (size == 3) value = mmu.read64(address);
-            
-            if (rt != 31) {
-                cpuState.registers[rt] = value;
+                bool cond = (op == 0) ? (val == 0) : (val != 0);
+                if (cond) {
+                    cpuState.pc += offset;
+                    bp.Update(cpuState.pc - offset, cpuState.pc);
+                    return;
+                }
+            } else if ((op1 & 0x1E) == 0b01110) { // TBZ, TBNZ
+                uint32_t b5 = (instr >> 31) & 1;
+                uint32_t b40 = (instr >> 19) & 0x1F;
+                uint32_t bit = (b5 << 5) | b40;
+                uint32_t op = (instr >> 24) & 1; // 0=TBZ, 1=TBNZ
+                uint32_t rt = instr & 0x1F;
+                int32_t imm14 = (instr >> 5) & 0x3FFF;
+                if (imm14 & 0x2000) imm14 |= 0xFFFFC000;
+                int64_t offset = static_cast<int64_t>(imm14) * 4;
+
+                uint64_t val = (rt == 31) ? 0 : cpuState.registers[rt];
+                bool isBitSet = ((val >> bit) & 1) != 0;
+                bool cond = (op == 0) ? !isBitSet : isBitSet;
+
+                if (cond) {
+                    cpuState.pc += offset;
+                    bp.Update(cpuState.pc - offset, cpuState.pc);
+                    return;
+                }
             }
-        } else {
-            uint64_t value = (rt == 31) ? 0 : cpuState.registers[rt];
-            if (size == 0) mmu.write8(address, static_cast<uint8_t>(value));
-            else if (size == 1) mmu.write16(address, static_cast<uint16_t>(value));
-            else if (size == 2) mmu.write32(address, static_cast<uint32_t>(value));
-            else if (size == 3) mmu.write64(address, value);
+        }
+        // Exception generation & System
+        else if (op0 == 0b100) {
+            uint32_t opc = (instr >> 21) & 0x7;
+            uint32_t op2 = (instr >> 2) & 0x7;
+            uint32_t ll = instr & 0x3;
+
+            if (opc == 0b000 && op2 == 0b000 && ll == 0b01) { // SVC
+                uint32_t imm16 = (instr >> 5) & 0xFFFF;
+                HorizonOS::getInstance().HandleSVC(imm16);
+            }
+            // System instructions: MRS, MSR, Hints, Barriers
+            else if ((instr & 0xFFC00000) == 0xD5000000) {
+                uint32_t L = (instr >> 21) & 1; // 0=MSR, 1=MRS
+                uint32_t rt = instr & 0x1F;
+                uint32_t op1 = (instr >> 16) & 0x7;
+                uint32_t CRn = (instr >> 12) & 0xF;
+                uint32_t CRm = (instr >> 8) & 0xF;
+                uint32_t op2_sys = (instr >> 5) & 0x7;
+                uint32_t sysReg = (op1 << 11) | (CRn << 7) | (CRm << 3) | op2_sys;
+
+                if (L == 1) { // MRS (Read System Register)
+                    uint64_t val = 0;
+                    if (sysReg == 0b011'1101'0000'010) { // TPIDR_EL0 (0xDE82)
+                        val = cpuState.tpidr_el0;
+                    } else if (sysReg == 0b011'1101'0000'011) { // TPIDRRO_EL0 (0xDE83)
+                        val = cpuState.tpidrro_el0;
+                    } else if (sysReg == 0b011'0100'0010'000) { // NZCV (0xDA10)
+                        val = cpuState.pstate;
+                    } else if (sysReg == 0b011'0100'0100'000) { // FPCR (0xDA20)
+                        val = cpuState.fpcr;
+                    } else if (sysReg == 0b011'0100'0100'001) { // FPSR (0xDA21)
+                        val = cpuState.fpsr;
+                    } else if (sysReg == 0b011'1110'0000'000) { // CNTFRQ_EL0 (0xDF00)
+                        val = 19200000ULL; // Switch 19.2MHz system counter
+                    } else if (sysReg == 0b011'1110'0000'010) { // CNTVCT_EL0 (0xDF02)
+                        auto now = std::chrono::steady_clock::now().time_since_epoch();
+                        val = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count() * 192ULL / 10000ULL;
+                    }
+                    if (rt != 31) cpuState.registers[rt] = val;
+                } else { // MSR (Write System Register)
+                    uint64_t val = (rt == 31) ? 0 : cpuState.registers[rt];
+                    if (sysReg == 0b011'1101'0000'010) {
+                        cpuState.tpidr_el0 = val;
+                    } else if (sysReg == 0b011'1101'0000'011) {
+                        cpuState.tpidrro_el0 = val;
+                    } else if (sysReg == 0b011'0100'0010'000) {
+                        cpuState.pstate = static_cast<uint32_t>(val);
+                    } else if (sysReg == 0b011'0100'0100'000) {
+                        cpuState.fpcr = static_cast<uint32_t>(val);
+                    } else if (sysReg == 0b011'0100'0100'001) {
+                        cpuState.fpsr = static_cast<uint32_t>(val);
+                    }
+                }
+            }
         }
 
         cpuState.pc += 4;
     }
 
-    static void ExecuteDataProcessingRegister(uint32_t instr) {
-        // E.g. ADD (shifted register), AND, ORR
+    // =========================================================================
+    // 3. LOADS AND STORES
+    // =========================================================================
+    static void ExecuteLoadsAndStores(uint32_t instr) {
+        auto& mmu = SwtcMmu::getGlobalMmu();
+        uint32_t size = (instr >> 30) & 0x3;
+        uint32_t V = (instr >> 26) & 0x1; // 0=GPR, 1=SIMD/FP
+        uint32_t opc = (instr >> 22) & 0x3;
+        uint32_t rn = (instr >> 5) & 0x1F;
+        uint32_t rt = instr & 0x1F;
+        uint64_t baseAddr = (rn == 31) ? cpuState.sp : cpuState.registers[rn];
+
+        // 1. Load/Store Pair (LDP / STP)
+        if ((instr & 0x3A000000) == 0x28000000) {
+            uint32_t ldpOpc = (instr >> 30) & 0x3;
+            uint32_t ldpL = (instr >> 22) & 0x1;
+            uint32_t rt2 = (instr >> 10) & 0x1F;
+            int32_t imm7 = (instr >> 15) & 0x7F;
+            if (imm7 & 0x40) imm7 |= 0xFFFFFF80;
+            
+            uint32_t scale = 4;
+            if (V == 1) scale = (ldpOpc == 0) ? 4 : ((ldpOpc == 1) ? 8 : 16);
+            else scale = (ldpOpc == 2) ? 8 : 4;
+
+            int64_t offset = static_cast<int64_t>(imm7) * scale;
+            uint32_t indexMode = (instr >> 23) & 0x3; // 1=post-index, 2=signed offset, 3=pre-index
+
+            uint64_t effAddr = baseAddr;
+            if (indexMode == 3) effAddr += offset; // Pre-index
+
+            if (ldpL == 1) { // Load Pair
+                if (V == 1) { // SIMD / FP pair
+                    if (ldpOpc == 0) { // 32-bit (S)
+                        cpuState.v[rt].u32[0] = mmu.read32(effAddr);
+                        cpuState.v[rt].u32[1] = 0;
+                        cpuState.v[rt].u64_pair.high = 0;
+                        cpuState.v[rt2].u32[0] = mmu.read32(effAddr + 4);
+                        cpuState.v[rt2].u32[1] = 0;
+                        cpuState.v[rt2].u64_pair.high = 0;
+                    } else if (ldpOpc == 1) { // 64-bit (D)
+                        cpuState.v[rt].u64_pair.low = mmu.read64(effAddr);
+                        cpuState.v[rt].u64_pair.high = 0;
+                        cpuState.v[rt2].u64_pair.low = mmu.read64(effAddr + 8);
+                        cpuState.v[rt2].u64_pair.high = 0;
+                    } else if (ldpOpc == 2) { // 128-bit (Q)
+                        cpuState.v[rt].u64_pair.low = mmu.read64(effAddr);
+                        cpuState.v[rt].u64_pair.high = mmu.read64(effAddr + 8);
+                        cpuState.v[rt2].u64_pair.low = mmu.read64(effAddr + 16);
+                        cpuState.v[rt2].u64_pair.high = mmu.read64(effAddr + 24);
+                    }
+                } else {
+                    if (ldpOpc == 2) { // 64-bit GPR
+                        uint64_t v1 = mmu.read64(effAddr);
+                        uint64_t v2 = mmu.read64(effAddr + 8);
+                        if (rt != 31) cpuState.registers[rt] = v1;
+                        if (rt2 != 31) cpuState.registers[rt2] = v2;
+                    } else { // 32-bit GPR
+                        uint32_t v1 = mmu.read32(effAddr);
+                        uint32_t v2 = mmu.read32(effAddr + 4);
+                        if (rt != 31) cpuState.registers[rt] = v1;
+                        if (rt2 != 31) cpuState.registers[rt2] = v2;
+                    }
+                }
+            } else { // Store Pair
+                if (V == 1) {
+                    if (ldpOpc == 0) {
+                        mmu.write32(effAddr, cpuState.v[rt].u32[0]);
+                        mmu.write32(effAddr + 4, cpuState.v[rt2].u32[0]);
+                    } else if (ldpOpc == 1) {
+                        mmu.write64(effAddr, cpuState.v[rt].u64_pair.low);
+                        mmu.write64(effAddr + 8, cpuState.v[rt2].u64_pair.low);
+                    } else if (ldpOpc == 2) {
+                        mmu.write64(effAddr, cpuState.v[rt].u64_pair.low);
+                        mmu.write64(effAddr + 8, cpuState.v[rt].u64_pair.high);
+                        mmu.write64(effAddr + 16, cpuState.v[rt2].u64_pair.low);
+                        mmu.write64(effAddr + 24, cpuState.v[rt2].u64_pair.high);
+                    }
+                } else {
+                    if (ldpOpc == 2) {
+                        uint64_t v1 = (rt == 31) ? 0 : cpuState.registers[rt];
+                        uint64_t v2 = (rt2 == 31) ? 0 : cpuState.registers[rt2];
+                        mmu.write64(effAddr, v1);
+                        mmu.write64(effAddr + 8, v2);
+                    } else {
+                        uint32_t v1 = (rt == 31) ? 0 : static_cast<uint32_t>(cpuState.registers[rt]);
+                        uint32_t v2 = (rt2 == 31) ? 0 : static_cast<uint32_t>(cpuState.registers[rt2]);
+                        mmu.write32(effAddr, v1);
+                        mmu.write32(effAddr + 4, v2);
+                    }
+                }
+            }
+
+            if (indexMode == 1) { // Post-index
+                if (rn == 31) cpuState.sp = baseAddr + offset;
+                else cpuState.registers[rn] = baseAddr + offset;
+            } else if (indexMode == 3) { // Pre-index
+                if (rn == 31) cpuState.sp = effAddr;
+                else cpuState.registers[rn] = effAddr;
+            }
+
+            cpuState.pc += 4;
+            return;
+        }
+
+        // 2. Single Load/Store Register (Unsigned immediate, unscaled / LDUR / STUR, register offset)
+        bool isLoad = (opc & 1) != 0;
+        uint64_t address = baseAddr;
+
+        if ((instr & 0x3B200C00) == 0x38200800) { // Register offset
+            uint32_t rm = (instr >> 16) & 0x1F;
+            uint32_t option = (instr >> 13) & 0x7;
+            uint32_t S_shift = (instr >> 12) & 0x1;
+            uint64_t valM = (rm == 31) ? 0 : cpuState.registers[rm];
+            uint64_t extOffset = ExtendValue(valM, option, S_shift ? size : 0);
+            address = baseAddr + extOffset;
+        } else if ((instr & 0x3B200000) == 0x38000000) { // Unscaled immediate (LDUR / STUR / Pre / Post index)
+            int32_t imm9 = (instr >> 12) & 0x1FF;
+            if (imm9 & 0x100) imm9 |= 0xFFFFFE00;
+            uint32_t idxMode = (instr >> 10) & 0x3;
+            if (idxMode == 3) address = baseAddr + imm9; // Pre-index
+            else address = baseAddr + (idxMode == 0 ? imm9 : 0);
+        } else { // Scaled unsigned immediate
+            uint64_t imm12 = (instr >> 10) & 0xFFF;
+            uint64_t offset = imm12 << size;
+            address = baseAddr + offset;
+        }
+
+        if (isLoad) {
+            if (V == 1) { // SIMD/FP Load
+                if (size == 0) cpuState.v[rt].u8[0] = mmu.read8(address);
+                else if (size == 1) cpuState.v[rt].u16[0] = mmu.read16(address);
+                else if (size == 2) cpuState.v[rt].u32[0] = mmu.read32(address);
+                else if (size == 3) {
+                    cpuState.v[rt].u64[0] = mmu.read64(address);
+                    cpuState.v[rt].u64[1] = 0;
+                }
+            } else { // GPR Load
+                uint64_t value = 0;
+                if (size == 0) {
+                    value = (opc == 0b10) ? static_cast<int8_t>(mmu.read8(address)) : mmu.read8(address);
+                } else if (size == 1) {
+                    value = (opc == 0b10) ? static_cast<int16_t>(mmu.read16(address)) : mmu.read16(address);
+                } else if (size == 2) {
+                    value = (opc == 0b10) ? static_cast<int32_t>(mmu.read32(address)) : mmu.read32(address);
+                } else if (size == 3) {
+                    value = mmu.read64(address);
+                }
+                if (rt != 31) cpuState.registers[rt] = value;
+            }
+        } else {
+            if (V == 1) { // SIMD/FP Store
+                if (size == 0) mmu.write8(address, cpuState.v[rt].u8[0]);
+                else if (size == 1) mmu.write16(address, cpuState.v[rt].u16[0]);
+                else if (size == 2) mmu.write32(address, cpuState.v[rt].u32[0]);
+                else if (size == 3) mmu.write64(address, cpuState.v[rt].u64[0]);
+            } else { // GPR Store
+                uint64_t value = (rt == 31) ? 0 : cpuState.registers[rt];
+                if (size == 0) mmu.write8(address, static_cast<uint8_t>(value));
+                else if (size == 1) mmu.write16(address, static_cast<uint16_t>(value));
+                else if (size == 2) mmu.write32(address, static_cast<uint32_t>(value));
+                else if (size == 3) mmu.write64(address, value);
+            }
+        }
+
+        // Post-index writeback if applicable
+        if ((instr & 0x3B200000) == 0x38000000) {
+            uint32_t idxMode = (instr >> 10) & 0x3;
+            int32_t imm9 = (instr >> 12) & 0x1FF;
+            if (imm9 & 0x100) imm9 |= 0xFFFFFE00;
+            if (idxMode == 1) { // Post-index
+                if (rn == 31) cpuState.sp = baseAddr + imm9;
+                else cpuState.registers[rn] = baseAddr + imm9;
+            } else if (idxMode == 3) { // Pre-index
+                if (rn == 31) cpuState.sp = address;
+                else cpuState.registers[rn] = address;
+            }
+        }
+
         cpuState.pc += 4;
     }
 
+    // =========================================================================
+    // 4. DATA PROCESSING - REGISTER
+    // =========================================================================
+    static void ExecuteDataProcessingRegister(uint32_t instr) {
+        uint32_t sf = (instr >> 31) & 1;
+        uint32_t rd = instr & 0x1F;
+        uint32_t rn = (instr >> 5) & 0x1F;
+        uint32_t rm = (instr >> 16) & 0x1F;
+        uint32_t shift = (instr >> 22) & 0x3;
+        uint32_t imm6 = (instr >> 10) & 0x3F;
+
+        uint64_t valN = (rn == 31) ? 0 : cpuState.registers[rn];
+        uint64_t valM = (rm == 31) ? 0 : cpuState.registers[rm];
+        if (!sf) {
+            valN &= 0xFFFFFFFFULL;
+            valM &= 0xFFFFFFFFULL;
+        }
+
+        // Add/Subtract (shifted register)
+        if ((instr & 0x1F000000) == 0x0B000000) {
+            uint32_t op = (instr >> 30) & 1; // 0=ADD, 1=SUB
+            uint32_t S = (instr >> 29) & 1;  // Set flags
+            uint64_t shiftedM = ShiftValue(valM, shift, imm6, sf != 0);
+
+            uint64_t res = (op == 0) ? (valN + shiftedM) : (valN - shiftedM);
+            if (S) {
+                if (sf) {
+                    bool c = (op == 0) ? (res < valN) : (valN >= shiftedM);
+                    bool v = (op == 0) ? ((~(valN ^ shiftedM) & (valN ^ res) & 0x8000000000000000ULL) != 0)
+                                       : (((valN ^ shiftedM) & (valN ^ res) & 0x8000000000000000ULL) != 0);
+                    cpuState.setNZCV((res & 0x8000000000000000ULL) != 0, res == 0, c, v);
+                } else {
+                    uint32_t r32 = static_cast<uint32_t>(res);
+                    uint32_t o1_32 = static_cast<uint32_t>(valN);
+                    uint32_t imm_32 = static_cast<uint32_t>(shiftedM);
+                    bool c = (op == 0) ? (r32 < o1_32) : (o1_32 >= imm_32);
+                    bool v = (op == 0) ? ((~(o1_32 ^ imm_32) & (o1_32 ^ r32) & 0x80000000U) != 0)
+                                       : (((o1_32 ^ imm_32) & (o1_32 ^ r32) & 0x80000000U) != 0);
+                    cpuState.setNZCV((r32 & 0x80000000U) != 0, r32 == 0, c, v);
+                }
+            }
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+        // Add/Subtract (extended register)
+        else if ((instr & 0x1FE00000) == 0x0B200000) {
+            uint32_t op = (instr >> 30) & 1;
+            uint32_t S = (instr >> 29) & 1;
+            uint32_t option = (instr >> 13) & 0x7;
+            uint32_t imm3 = (instr >> 10) & 0x7;
+            uint64_t extM = ExtendValue(valM, option, imm3);
+            uint64_t baseN = (rn == 31) ? cpuState.sp : cpuState.registers[rn];
+            if (!sf) baseN &= 0xFFFFFFFFULL;
+
+            uint64_t res = (op == 0) ? (baseN + extM) : (baseN - extM);
+            if (S) {
+                if (sf) cpuState.updateNZ64(res);
+                else cpuState.updateNZ32(static_cast<uint32_t>(res));
+            }
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd == 31 && !S) cpuState.sp = res;
+            else if (rd != 31) cpuState.registers[rd] = res;
+        }
+        // Logical (shifted register)
+        else if ((instr & 0x1F000000) == 0x0A000000) {
+            uint32_t opc = (instr >> 29) & 0x3;
+            uint32_t N = (instr >> 21) & 1;
+            uint64_t shiftedM = ShiftValue(valM, shift, imm6, sf != 0);
+            if (N) shiftedM = ~shiftedM;
+
+            uint64_t res = 0;
+            switch (opc) {
+                case 0b00: res = valN & shiftedM; break; // AND / BIC
+                case 0b01: res = valN | shiftedM; break; // ORR / ORN
+                case 0b10: res = valN ^ shiftedM; break; // EOR / EON
+                case 0b11: res = valN & shiftedM; break; // ANDS / BICS
+            }
+            if (opc == 0b11) {
+                if (sf) cpuState.updateNZ64(res);
+                else cpuState.updateNZ32(static_cast<uint32_t>(res));
+            }
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+        // Variable shift / 2-source / 1-source data processing
+        else if ((instr & 0x1FE0F800) == 0x1AC02000) {
+            uint32_t opc = (instr >> 10) & 0x3F;
+            uint64_t res = 0;
+            if (opc == 0b000010) { // UDIV
+                if (valM != 0) res = valN / valM;
+            } else if (opc == 0b000011) { // SDIV
+                if (sf) {
+                    if (static_cast<int64_t>(valM) != 0) res = static_cast<int64_t>(valN) / static_cast<int64_t>(valM);
+                } else {
+                    if (static_cast<int32_t>(valM) != 0) res = static_cast<int32_t>(valN) / static_cast<int32_t>(valM);
+                }
+            } else if (opc == 0b001000) { // LSLV
+                res = ShiftValue(valN, 0, valM & (sf ? 63 : 31), sf != 0);
+            } else if (opc == 0b001001) { // LSRV
+                res = ShiftValue(valN, 1, valM & (sf ? 63 : 31), sf != 0);
+            } else if (opc == 0b001010) { // ASRV
+                res = ShiftValue(valN, 2, valM & (sf ? 63 : 31), sf != 0);
+            } else if (opc == 0b001011) { // RORV
+                res = ShiftValue(valN, 3, valM & (sf ? 63 : 31), sf != 0);
+            }
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+        // 1-source data processing (REV, RBIT, CLZ)
+        else if ((instr & 0x5FE0FC00) == 0x5AC00000) {
+            uint32_t opc = (instr >> 10) & 0x3F;
+            uint64_t res = 0;
+            if (opc == 0b000100) { // CLZ
+                if (sf) res = (valN == 0) ? 64 : __builtin_clzll(valN);
+                else res = (valN == 0) ? 32 : __builtin_clz(static_cast<uint32_t>(valN));
+            } else if (opc == 0b000010) { // REV (32-bit swap or 64-bit swap)
+                if (sf) res = __builtin_bswap64(valN);
+                else res = __builtin_bswap32(static_cast<uint32_t>(valN));
+            } else if (opc == 0b000001) { // REV16
+                if (sf) {
+                    res = ((valN & 0xFF00FF00FF00FF00ULL) >> 8) | ((valN & 0x00FF00FF00FF00FFULL) << 8);
+                } else {
+                    res = ((valN & 0xFF00FF00U) >> 8) | ((valN & 0x00FF00FFU) << 8);
+                }
+            } else if (opc == 0b000011) { // REV32
+                res = ((valN >> 32) & 0xFFFFFFFFULL) | ((valN & 0xFFFFFFFFULL) << 32);
+                res = (__builtin_bswap32(res & 0xFFFFFFFFULL)) | (static_cast<uint64_t>(__builtin_bswap32(res >> 32)) << 32);
+            }
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+        // Conditional Select (CSEL, CSINC, CSINV, CSNEG)
+        else if ((instr & 0x1FE00000) == 0x1A800000) {
+            uint32_t cond = (instr >> 12) & 0xF;
+            uint32_t op = (instr >> 30) & 1;
+            uint32_t o2 = (instr >> 10) & 1;
+            bool conditionMet = cpuState.testCondition(cond);
+
+            uint64_t res;
+            if (conditionMet) {
+                res = valN;
+            } else {
+                if (op == 0 && o2 == 0) res = valM;         // CSEL
+                else if (op == 0 && o2 == 1) res = valM + 1; // CSINC
+                else if (op == 1 && o2 == 0) res = ~valM;    // CSINV
+                else res = -valM;                           // CSNEG
+            }
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+        // Multiply / Divide 3-source (MADD, MSUB, SMADDL, UMADDL)
+        else if ((instr & 0x1F000000) == 0x1B000000) {
+            uint32_t ra = (instr >> 10) & 0x1F;
+            uint32_t op = (instr >> 15) & 1;
+            uint64_t valA = (ra == 31) ? 0 : cpuState.registers[ra];
+            uint64_t res = (op == 0) ? (valA + (valN * valM)) : (valA - (valN * valM));
+            if (!sf) res &= 0xFFFFFFFFULL;
+            if (rd != 31) cpuState.registers[rd] = res;
+        }
+
+        cpuState.pc += 4;
+    }
+
+    // =========================================================================
+    // 5. DATA PROCESSING - SIMD & FLOATING POINT
+    // =========================================================================
     static void ExecuteDataProcessingSIMDFP(uint32_t instr) {
-        // NEON and Floating Point operations
+        uint32_t ftype = (instr >> 22) & 0x3;
+        uint32_t rd = instr & 0x1F;
+        uint32_t rn = (instr >> 5) & 0x1F;
+        uint32_t rm = (instr >> 16) & 0x1F;
+
+        // 1. Scalar Floating Point Arithmetic (Single/Double precision: FADD, FSUB, FMUL, FDIV, FSQRT, FMAX, FMIN, FABS, FNEG)
+        if ((instr & 0x5F200000) == 0x1E200000) {
+            uint32_t opc = (instr >> 12) & 0xF;
+            if (ftype == 1) { // Double precision (64-bit)
+                double valN = cpuState.v[rn].f64[0];
+                double valM = cpuState.v[rm].f64[0];
+                double res = 0.0;
+                switch (opc) {
+                    case 0b0000: res = valN * valM; break; // FMUL
+                    case 0b0001: res = valN / valM; break; // FDIV
+                    case 0b0010: res = valN + valM; break; // FADD
+                    case 0b0011: res = valN - valM; break; // FSUB
+                    case 0b0100: res = std::max(valN, valM); break; // FMAX
+                    case 0b0101: res = std::min(valN, valM); break; // FMIN
+                }
+                cpuState.setFloatD(rd, res);
+            } else if (ftype == 0) { // Single precision (32-bit)
+                float valN = cpuState.v[rn].f32[0];
+                float valM = cpuState.v[rm].f32[0];
+                float res = 0.0f;
+                switch (opc) {
+                    case 0b0000: res = valN * valM; break; // FMUL
+                    case 0b0001: res = valN / valM; break; // FDIV
+                    case 0b0010: res = valN + valM; break; // FADD
+                    case 0b0011: res = valN - valM; break; // FSUB
+                    case 0b0100: res = std::max(valN, valM); break; // FMAX
+                    case 0b0101: res = std::min(valN, valM); break; // FMIN
+                }
+                cpuState.setFloatS(rd, res);
+            }
+        }
+        // 2. Scalar Floating Point 1-source (FSQRT, FABS, FNEG, FCVT)
+        else if ((instr & 0x5F207C00) == 0x1E204000) {
+            uint32_t opc = (instr >> 15) & 0x3F;
+            if (ftype == 1) { // Double
+                double valN = cpuState.v[rn].f64[0];
+                if (opc == 0b000001) cpuState.setFloatD(rd, std::fabs(valN)); // FABS
+                else if (opc == 0b000010) cpuState.setFloatD(rd, -valN);     // FNEG
+                else if (opc == 0b000011) cpuState.setFloatD(rd, std::sqrt(valN)); // FSQRT
+                else if (opc == 0b000100) cpuState.setFloatS(rd, static_cast<float>(valN)); // FCVT (D -> S)
+            } else if (ftype == 0) { // Single
+                float valN = cpuState.v[rn].f32[0];
+                if (opc == 0b000001) cpuState.setFloatS(rd, std::fabs(valN)); // FABS
+                else if (opc == 0b000010) cpuState.setFloatS(rd, -valN);     // FNEG
+                else if (opc == 0b000011) cpuState.setFloatS(rd, std::sqrt(valN)); // FSQRT
+                else if (opc == 0b000101) cpuState.setFloatD(rd, static_cast<double>(valN)); // FCVT (S -> D)
+            }
+        }
+        // 3. Floating Point Compare (FCMP, FCMPE)
+        else if ((instr & 0xFF200000) == 0x1E202000) {
+            if (ftype == 1) {
+                double valN = cpuState.v[rn].f64[0];
+                double valM = (instr & (1 << 3)) ? 0.0 : cpuState.v[rm].f64[0];
+                bool n = (valN < valM);
+                bool z = (valN == valM);
+                bool c = (valN >= valM);
+                bool v = std::isnan(valN) || std::isnan(valM);
+                cpuState.setNZCV(n, z, c, v);
+            } else if (ftype == 0) {
+                float valN = cpuState.v[rn].f32[0];
+                float valM = (instr & (1 << 3)) ? 0.0f : cpuState.v[rm].f32[0];
+                bool n = (valN < valM);
+                bool z = (valN == valM);
+                bool c = (valN >= valM);
+                bool v = std::isnan(valN) || std::isnan(valM);
+                cpuState.setNZCV(n, z, c, v);
+            }
+        }
+        // 4. Floating Point <-> Integer Conversion & Move (FCVTZS, FCVTZU, SCVTF, UCVTF, FMOV)
+        else if ((instr & 0x5F200000) == 0x1E000000) {
+            uint32_t sf = (instr >> 31) & 1;
+            uint32_t opc = (instr >> 16) & 0x7;
+
+            if (opc == 0b000) { // FCVTZS (FP to Signed Int)
+                if (ftype == 1) {
+                    double d = cpuState.v[rn].f64[0];
+                    if (sf && rd != 31) cpuState.registers[rd] = static_cast<int64_t>(d);
+                    else if (!sf && rd != 31) cpuState.registers[rd] = static_cast<uint32_t>(static_cast<int32_t>(d));
+                } else if (ftype == 0) {
+                    float f = cpuState.v[rn].f32[0];
+                    if (sf && rd != 31) cpuState.registers[rd] = static_cast<int64_t>(f);
+                    else if (!sf && rd != 31) cpuState.registers[rd] = static_cast<uint32_t>(static_cast<int32_t>(f));
+                }
+            } else if (opc == 0b001) { // FCVTZU (FP to Unsigned Int)
+                if (ftype == 1) {
+                    double d = cpuState.v[rn].f64[0];
+                    if (sf && rd != 31) cpuState.registers[rd] = static_cast<uint64_t>(d);
+                    else if (!sf && rd != 31) cpuState.registers[rd] = static_cast<uint32_t>(d);
+                } else if (ftype == 0) {
+                    float f = cpuState.v[rn].f32[0];
+                    if (sf && rd != 31) cpuState.registers[rd] = static_cast<uint64_t>(f);
+                    else if (!sf && rd != 31) cpuState.registers[rd] = static_cast<uint32_t>(f);
+                }
+            } else if (opc == 0b010) { // SCVTF (Signed Int to FP)
+                int64_t src = sf ? static_cast<int64_t>(cpuState.registers[rn]) : static_cast<int32_t>(cpuState.registers[rn]);
+                if (ftype == 1) cpuState.setFloatD(rd, static_cast<double>(src));
+                else if (ftype == 0) cpuState.setFloatS(rd, static_cast<float>(src));
+            } else if (opc == 0b011) { // UCVTF (Unsigned Int to FP)
+                uint64_t src = sf ? cpuState.registers[rn] : static_cast<uint32_t>(cpuState.registers[rn]);
+                if (ftype == 1) cpuState.setFloatD(rd, static_cast<double>(src));
+                else if (ftype == 0) cpuState.setFloatS(rd, static_cast<float>(src));
+            } else if (opc == 0b110) { // FMOV (GPR to FP register)
+                if (sf) cpuState.v[rd].u64[0] = (rn == 31) ? 0 : cpuState.registers[rn];
+                else cpuState.v[rd].u32[0] = (rn == 31) ? 0 : static_cast<uint32_t>(cpuState.registers[rn]);
+                cpuState.v[rd].u64[1] = 0;
+            } else if (opc == 0b111) { // FMOV (FP register to GPR)
+                if (rd != 31) {
+                    if (sf) cpuState.registers[rd] = cpuState.v[rn].u64[0];
+                    else cpuState.registers[rd] = cpuState.v[rn].u32[0];
+                }
+            }
+        }
+        // 5. Floating Point Conditional Select (FCSEL)
+        else if ((instr & 0xFF200C00) == 0x1E200C00) {
+            uint32_t cond = (instr >> 12) & 0xF;
+            bool conditionMet = cpuState.testCondition(cond);
+            uint32_t sel = conditionMet ? rn : rm;
+            if (ftype == 1) cpuState.setFloatD(rd, cpuState.v[sel].f64[0]);
+            else if (ftype == 0) cpuState.setFloatS(rd, cpuState.v[sel].f32[0]);
+        }
+        // 6. Advanced SIMD Vector Arithmetic & Logic (128-bit / 64-bit NEON)
+        else if ((instr & 0x0E200400) == 0x0E200400) {
+            uint32_t Q = (instr >> 30) & 1;
+            uint32_t u = (instr >> 29) & 1;
+            uint32_t size = (instr >> 22) & 3;
+            uint32_t opcode = (instr >> 11) & 0x1F;
+
+            // Vector ADD
+            if (opcode == 0b10000 && u == 0) {
+                if (size == 0) { // 8B / 16B
+                    int lanes = Q ? 16 : 8;
+                    for (int i = 0; i < lanes; ++i) cpuState.v[rd].u8[i] = cpuState.v[rn].u8[i] + cpuState.v[rm].u8[i];
+                } else if (size == 1) { // 4H / 8H
+                    int lanes = Q ? 8 : 4;
+                    for (int i = 0; i < lanes; ++i) cpuState.v[rd].u16[i] = cpuState.v[rn].u16[i] + cpuState.v[rm].u16[i];
+                } else if (size == 2) { // 2S / 4S
+                    int lanes = Q ? 4 : 2;
+                    for (int i = 0; i < lanes; ++i) cpuState.v[rd].u32[i] = cpuState.v[rn].u32[i] + cpuState.v[rm].u32[i];
+                } else if (size == 3) { // 2D
+                    cpuState.v[rd].u64[0] = cpuState.v[rn].u64[0] + cpuState.v[rm].u64[0];
+                    if (Q) cpuState.v[rd].u64[1] = cpuState.v[rn].u64[1] + cpuState.v[rm].u64[1];
+                }
+            }
+            // Vector SUB
+            else if (opcode == 0b10000 && u == 1) {
+                if (size == 0) {
+                    int lanes = Q ? 16 : 8;
+                    for (int i = 0; i < lanes; ++i) cpuState.v[rd].u8[i] = cpuState.v[rn].u8[i] - cpuState.v[rm].u8[i];
+                } else if (size == 1) {
+                    int lanes = Q ? 8 : 4;
+                    for (int i = 0; i < lanes; ++i) cpuState.v[rd].u16[i] = cpuState.v[rn].u16[i] - cpuState.v[rm].u16[i];
+                } else if (size == 2) {
+                    int lanes = Q ? 4 : 2;
+                    for (int i = 0; i < lanes; ++i) cpuState.v[rd].u32[i] = cpuState.v[rn].u32[i] - cpuState.v[rm].u32[i];
+                } else if (size == 3) {
+                    cpuState.v[rd].u64[0] = cpuState.v[rn].u64[0] - cpuState.v[rm].u64[0];
+                    if (Q) cpuState.v[rd].u64[1] = cpuState.v[rn].u64[1] - cpuState.v[rm].u64[1];
+                }
+            }
+            // Vector Bitwise Logic (AND, ORR, EOR, BIC)
+            else if (opcode == 0b00011) {
+                if (size == 0) { // AND
+                    cpuState.v[rd].u64[0] = cpuState.v[rn].u64[0] & cpuState.v[rm].u64[0];
+                    if (Q) cpuState.v[rd].u64[1] = cpuState.v[rn].u64[1] & cpuState.v[rm].u64[1];
+                } else if (size == 1) { // BIC
+                    cpuState.v[rd].u64[0] = cpuState.v[rn].u64[0] & ~cpuState.v[rm].u64[0];
+                    if (Q) cpuState.v[rd].u64[1] = cpuState.v[rn].u64[1] & ~cpuState.v[rm].u64[1];
+                } else if (size == 2) { // ORR
+                    cpuState.v[rd].u64[0] = cpuState.v[rn].u64[0] | cpuState.v[rm].u64[0];
+                    if (Q) cpuState.v[rd].u64[1] = cpuState.v[rn].u64[1] | cpuState.v[rm].u64[1];
+                } else if (size == 3) { // EOR
+                    cpuState.v[rd].u64[0] = cpuState.v[rn].u64[0] ^ cpuState.v[rm].u64[0];
+                    if (Q) cpuState.v[rd].u64[1] = cpuState.v[rn].u64[1] ^ cpuState.v[rm].u64[1];
+                }
+            }
+            // Vector Floating Point Arithmetic (FADD, FSUB, FMUL, FDIV)
+            else if (opcode == 0b11010 || opcode == 0b11011) {
+                int lanes = Q ? 4 : 2;
+                if (size == 0) { // Single precision 2S / 4S
+                    for (int i = 0; i < lanes; ++i) {
+                        float a = cpuState.v[rn].f32[i];
+                        float b = cpuState.v[rm].f32[i];
+                        if (opcode == 0b11010 && u == 0) cpuState.v[rd].f32[i] = a + b; // FADD
+                        else if (opcode == 0b11010 && u == 1) cpuState.v[rd].f32[i] = a - b; // FSUB
+                        else if (opcode == 0b11011 && u == 0) cpuState.v[rd].f32[i] = a * b; // FMUL
+                        else if (opcode == 0b11011 && u == 1) cpuState.v[rd].f32[i] = a / b; // FDIV
+                    }
+                }
+            }
+
+            if (!Q) cpuState.v[rd].u64[1] = 0;
+        }
+        // 7. Vector SIMD Element Duplication & Move (DUP, INS, UMOV)
+        else if ((instr & 0x0E000000) == 0x0E000000) {
+            uint32_t imm5 = (instr >> 16) & 0x1F;
+            uint32_t op = (instr >> 29) & 1;
+
+            if (imm5 != 0) {
+                // Determine lowest bit set for size (1=B, 2=H, 4=S, 8=D)
+                int sizeBit = __builtin_ctz(imm5);
+                int index = imm5 >> (sizeBit + 1);
+
+                if ((instr & 0x0FE08400) == 0x0E000400) { // DUP (General Register to Vector)
+                    uint64_t val = (rn == 31) ? 0 : cpuState.registers[rn];
+                    if (sizeBit == 0) {
+                        for (int i = 0; i < 16; ++i) cpuState.v[rd].u8[i] = static_cast<uint8_t>(val);
+                    } else if (sizeBit == 1) {
+                        for (int i = 0; i < 8; ++i) cpuState.v[rd].u16[i] = static_cast<uint16_t>(val);
+                    } else if (sizeBit == 2) {
+                        for (int i = 0; i < 4; ++i) cpuState.v[rd].u32[i] = static_cast<uint32_t>(val);
+                    } else if (sizeBit == 3) {
+                        cpuState.v[rd].u64[0] = val;
+                        cpuState.v[rd].u64[1] = val;
+                    }
+                } else if ((instr & 0x0FE08400) == 0x0E003C00) { // UMOV (Vector Element to General Register)
+                    if (rd != 31) {
+                        if (sizeBit == 0) cpuState.registers[rd] = cpuState.v[rn].u8[index & 15];
+                        else if (sizeBit == 1) cpuState.registers[rd] = cpuState.v[rn].u16[index & 7];
+                        else if (sizeBit == 2) cpuState.registers[rd] = cpuState.v[rn].u32[index & 3];
+                        else if (sizeBit == 3) cpuState.registers[rd] = cpuState.v[rn].u64[index & 1];
+                    }
+                } else if ((instr & 0x0FE08400) == 0x0E001C00) { // INS (General Register to Vector Element)
+                    uint64_t val = (rn == 31) ? 0 : cpuState.registers[rn];
+                    if (sizeBit == 0) cpuState.v[rd].u8[index & 15] = static_cast<uint8_t>(val);
+                    else if (sizeBit == 1) cpuState.v[rd].u16[index & 7] = static_cast<uint16_t>(val);
+                    else if (sizeBit == 2) cpuState.v[rd].u32[index & 3] = static_cast<uint32_t>(val);
+                    else if (sizeBit == 3) cpuState.v[rd].u64[index & 1] = val;
+                }
+            }
+        }
+
         cpuState.pc += 4;
     }
 };

@@ -247,17 +247,34 @@ object KeyManager {
     }
 
     /**
-     * Decrypts an encrypted 0xC00 byte NCA Header using the NCA Header Key (AES-XTS 128-bit)
-     * and performs formal HMAC-SHA256 signature verification.
+     * Decrypts an encrypted NCA Header using the NCA Header Key (AES-XTS 128-bit)
+     * and performs formal Magic ("NCA3" / "NCA2") validation.
      *
-     * If the key is missing, invalid, corrupted, or fails HMAC signature validation,
-     * a [DecryptionException] is thrown.
+     * If the input is already plaintext (unencrypted), returns the header directly.
+     * If the key is missing or invalid, throws a [DecryptionException].
      */
     @Throws(DecryptionException::class)
     fun decryptNcaHeader(
         encryptedHeader: ByteArray,
         headerKey: ByteArray?
     ): ByteArray {
+        if (encryptedHeader.size < 0x400) {
+            throw DecryptionException(
+                message = "Encrypted NCA header buffer too small: Expected at least 0x400 bytes, got ${encryptedHeader.size} bytes.",
+                errorCode = KeyErrorCode.CORRUPTED_KEY_AREA
+            )
+        }
+
+        // Check if header is already decrypted (plaintext NCA3 / NCA2 magic at offset 0x200)
+        val m0 = encryptedHeader[0x200].toInt() and 0xFF
+        val m1 = encryptedHeader[0x201].toInt() and 0xFF
+        val m2 = encryptedHeader[0x202].toInt() and 0xFF
+        val m3 = encryptedHeader[0x203].toInt() and 0xFF
+        val existingMagic = "${m0.toChar()}${m1.toChar()}${m2.toChar()}${m3.toChar()}"
+        if (existingMagic == "NCA3" || existingMagic == "NCA2") {
+            return encryptedHeader.copyOf(0xC00.coerceAtMost(encryptedHeader.size))
+        }
+
         if (headerKey == null || headerKey.isEmpty()) {
             throw DecryptionException(
                 message = "Missing 'header_key' in prod.keys. NCA header decryption requires a valid 32-byte header key.",
@@ -274,21 +291,17 @@ object KeyManager {
                 isMissingProdKeys = true
             )
         }
-        if (encryptedHeader.size < 0xC00) {
-            throw DecryptionException(
-                message = "Encrypted NCA header buffer too small: Expected at least 0xC00 (3072) bytes, got ${encryptedHeader.size} bytes.",
-                errorCode = KeyErrorCode.CORRUPTED_KEY_AREA
-            )
-        }
 
         val key1 = headerKey.copyOfRange(0, 16)
         val key2 = headerKey.copyOfRange(16, 32)
+        val decryptLen = (encryptedHeader.size / 0x200) * 0x200
+        val targetLen = 0xC00.coerceAtMost(decryptLen)
 
         val decryptedHeader: ByteArray = try {
             decryptAesXts(
                 data = encryptedHeader,
                 offset = 0,
-                length = 0xC00,
+                length = targetLen,
                 key1 = key1,
                 key2 = key2,
                 sectorSize = 0x200,
@@ -303,11 +316,11 @@ object KeyManager {
         }
 
         // Validate Magic in Decrypted Header at offset 0x200 ("NCA3" or "NCA2")
-        val m0 = decryptedHeader[0x200].toInt() and 0xFF
-        val m1 = decryptedHeader[0x201].toInt() and 0xFF
-        val m2 = decryptedHeader[0x202].toInt() and 0xFF
-        val m3 = decryptedHeader[0x203].toInt() and 0xFF
-        val magic = "${m0.toChar()}${m1.toChar()}${m2.toChar()}${m3.toChar()}"
+        val dm0 = decryptedHeader[0x200].toInt() and 0xFF
+        val dm1 = decryptedHeader[0x201].toInt() and 0xFF
+        val dm2 = decryptedHeader[0x202].toInt() and 0xFF
+        val dm3 = decryptedHeader[0x203].toInt() and 0xFF
+        val magic = "${dm0.toChar()}${dm1.toChar()}${dm2.toChar()}${dm3.toChar()}"
 
         if (magic != "NCA3" && magic != "NCA2") {
             throw DecryptionException(
@@ -317,6 +330,65 @@ object KeyManager {
         }
 
         return decryptedHeader
+    }
+
+    /**
+     * Encrypts data using AES-XTS mode (IEEE 1619 standard) with GF(2^128) tweak polynomial progression.
+     */
+    fun encryptAesXts(
+        data: ByteArray,
+        offset: Int,
+        length: Int,
+        key1: ByteArray,
+        key2: ByteArray,
+        sectorSize: Int = 0x200,
+        startSectorIndex: Long = 0L
+    ): ByteArray {
+        if (offset + length > data.size) {
+            throw IllegalArgumentException("XTS offset + length exceeds data size")
+        }
+
+        val result = ByteArray(length)
+        System.arraycopy(data, offset, result, 0, length)
+
+        val cipherData = Cipher.getInstance("AES/ECB/NoPadding")
+        val cipherTweak = Cipher.getInstance("AES/ECB/NoPadding")
+
+        cipherData.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key1.copyOf(16), "AES"))
+        cipherTweak.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key2.copyOf(16), "AES"))
+
+        val numSectors = length / sectorSize
+
+        for (sec in 0 until numSectors) {
+            val sectorIndex = startSectorIndex + sec
+            val secOffset = sec * sectorSize
+
+            // Initial Tweak T = Encrypt(Key2, sectorIndex as 16-byte LE)
+            val tweakBlock = ByteArray(16)
+            ByteBuffer.wrap(tweakBlock).order(ByteOrder.LITTLE_ENDIAN).putLong(0, sectorIndex)
+            val initialTweak = cipherTweak.doFinal(tweakBlock)
+            var currentTweak = initialTweak.clone()
+
+            for (blk in 0 until (sectorSize / 16)) {
+                val blkOffset = secOffset + (blk * 16)
+                if (blkOffset + 16 > length) break
+
+                val p = ByteArray(16)
+                for (i in 0 until 16) {
+                    p[i] = (result[blkOffset + i].toInt() xor currentTweak[i].toInt()).toByte()
+                }
+
+                val c = cipherData.doFinal(p)
+
+                for (i in 0 until 16) {
+                    result[blkOffset + i] = (c[i].toInt() xor currentTweak[i].toInt()).toByte()
+                }
+
+                currentTweak = multiplyTweakGf128(currentTweak)
+            }
+        }
+
+        return result
     }
 
     /**

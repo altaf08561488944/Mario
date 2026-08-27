@@ -4,8 +4,10 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.example.data.dao.GameFileDao
 import com.example.data.dao.SwtcDao
 import com.example.data.entity.BootConfigEntity
+import com.example.data.entity.ImportedGameFileEntity
 import com.example.data.entity.MyFolderFileEntity
 import com.example.data.entity.SaveStateEntity
 import com.example.data.entity.VirtualCartridgeEntity
@@ -15,14 +17,16 @@ import com.example.data.entity.VirtualCartridgeEntity
         BootConfigEntity::class,
         VirtualCartridgeEntity::class,
         MyFolderFileEntity::class,
-        SaveStateEntity::class
+        SaveStateEntity::class,
+        ImportedGameFileEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class SwtcDatabase : RoomDatabase() {
 
     abstract fun swtcDao(): SwtcDao
+    abstract fun gameFileDao(): GameFileDao
 
     companion object {
         @Volatile

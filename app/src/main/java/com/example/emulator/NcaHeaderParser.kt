@@ -62,49 +62,77 @@ object NcaHeaderParser {
             return NcaInfo(false, "", ContentType.UNKNOWN, "", "", 0, 0, emptyList(), headerBaseOffset)
         }
 
-        val magicOffset = headerBaseOffset + 0x200
-        val m0 = data[magicOffset].toInt() and 0xFF
-        val m1 = data[magicOffset + 1].toInt() and 0xFF
-        val m2 = data[magicOffset + 2].toInt() and 0xFF
-        val m3 = data[magicOffset + 3].toInt() and 0xFF
-        val magic = "${m0.toChar()}${m1.toChar()}${m2.toChar()}${m3.toChar()}"
+        var workingData = data
+        var workingOffset = headerBaseOffset
 
-        val isNca = magic == "NCA3" || magic == "NCA2"
+        val magicOffset = workingOffset + 0x200
+        val m0 = workingData[magicOffset].toInt() and 0xFF
+        val m1 = workingData[magicOffset + 1].toInt() and 0xFF
+        val m2 = workingData[magicOffset + 2].toInt() and 0xFF
+        val m3 = workingData[magicOffset + 3].toInt() and 0xFF
+        var magic = "${m0.toChar()}${m1.toChar()}${m2.toChar()}${m3.toChar()}"
+
+        var isNca = magic == "NCA3" || magic == "NCA2"
+
+        // If not plaintext NCA, attempt AES-XTS Header Decryption with active header_key
+        if (!isNca && data.size >= headerBaseOffset + 0x400) {
+            try {
+                val headerKey = SwitchKeysManager.getKeySet().headerKey
+                if (headerKey != null && headerKey.size == 32) {
+                    val sliceLen = 0xC00.coerceAtMost(data.size - headerBaseOffset)
+                    val rawEncrypted = data.copyOfRange(headerBaseOffset, headerBaseOffset + sliceLen)
+                    val decrypted = KeyManager.decryptNcaHeader(rawEncrypted, headerKey)
+                    if (decrypted.size >= 0x400) {
+                        workingData = decrypted
+                        workingOffset = 0
+                        val dm0 = workingData[0x200].toInt() and 0xFF
+                        val dm1 = workingData[0x201].toInt() and 0xFF
+                        val dm2 = workingData[0x202].toInt() and 0xFF
+                        val dm3 = workingData[0x203].toInt() and 0xFF
+                        magic = "${dm0.toChar()}${dm1.toChar()}${dm2.toChar()}${dm3.toChar()}"
+                        isNca = magic == "NCA3" || magic == "NCA2"
+                    }
+                }
+            } catch (e: Exception) {
+                // Keep isNca = false if decryption fails
+            }
+        }
+
         if (!isNca) {
             return NcaInfo(false, magic, ContentType.UNKNOWN, "", "", 0, 0, emptyList(), headerBaseOffset)
         }
 
-        val distType = data[headerBaseOffset + 0x204].toInt() and 0xFF
-        val rawContentType = data[headerBaseOffset + 0x205].toInt() and 0xFF
+        val distType = workingData[workingOffset + 0x204].toInt() and 0xFF
+        val rawContentType = workingData[workingOffset + 0x205].toInt() and 0xFF
         val contentType = ContentType.values().firstOrNull { it.id == rawContentType } ?: ContentType.UNKNOWN
 
-        val kaekIndex = data[headerBaseOffset + 0x206].toInt() and 0xFF
+        val kaekIndex = workingData[workingOffset + 0x206].toInt() and 0xFF
         val masterKeyRev = kaekIndex.coerceAtLeast(1)
 
         // Read Title ID at 0x210 (uint64, Little Endian)
-        val titleIdBuffer = ByteBuffer.wrap(data, headerBaseOffset + 0x210, 8).order(ByteOrder.LITTLE_ENDIAN)
+        val titleIdBuffer = ByteBuffer.wrap(workingData, workingOffset + 0x210, 8).order(ByteOrder.LITTLE_ENDIAN)
         val titleIdLong = titleIdBuffer.long
         val titleIdHex = "0100" + "%012X".format(titleIdLong and 0x00FFFFFF_FFFFFFFFL)
 
         // Read SDK Version at 0x21C
-        val sdkMajor = data[headerBaseOffset + 0x21F].toInt() and 0xFF
-        val sdkMinor = data[headerBaseOffset + 0x21E].toInt() and 0xFF
+        val sdkMajor = workingData[workingOffset + 0x21F].toInt() and 0xFF
+        val sdkMinor = workingData[workingOffset + 0x21E].toInt() and 0xFF
         val sdkVersion = "$sdkMajor.$sdkMinor.0"
 
         // Parse 4 Section Headers starting at 0x240
         val sections = mutableListOf<NcaSectionHeader>()
         for (i in 0 until 4) {
-            val sectionHeaderOff = headerBaseOffset + 0x240 + (i * 0x20)
-            val mediaOff = ByteBuffer.wrap(data, sectionHeaderOff, 4).order(ByteOrder.LITTLE_ENDIAN).int
-            val mediaEndOff = ByteBuffer.wrap(data, sectionHeaderOff + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
+            val sectionHeaderOff = workingOffset + 0x240 + (i * 0x20)
+            val mediaOff = ByteBuffer.wrap(workingData, sectionHeaderOff, 4).order(ByteOrder.LITTLE_ENDIAN).int
+            val mediaEndOff = ByteBuffer.wrap(workingData, sectionHeaderOff + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
 
             if (mediaOff > 0 && mediaEndOff > mediaOff) {
                 val startByte = mediaOff.toLong() * 0x200L
                 val endByte = mediaEndOff.toLong() * 0x200L
                 val sizeBytes = endByte - startByte
 
-                val fsType = data[sectionHeaderOff + 8].toInt() and 0xFF
-                val cryptoType = data[sectionHeaderOff + 9].toInt() and 0xFF
+                val fsType = workingData[sectionHeaderOff + 8].toInt() and 0xFF
+                val cryptoType = workingData[sectionHeaderOff + 9].toInt() and 0xFF
 
                 sections.add(
                     NcaSectionHeader(

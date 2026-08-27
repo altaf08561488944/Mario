@@ -1,8 +1,11 @@
 package com.example.data.repository
 
 import android.content.Context
+import com.example.data.dao.GameFileDao
 import com.example.data.dao.SwtcDao
+import com.example.data.database.SwtcDatabase
 import com.example.data.entity.BootConfigEntity
+import com.example.data.entity.ImportedGameFileEntity
 import com.example.data.entity.MyFolderFileEntity
 import com.example.data.entity.SaveStateEntity
 import com.example.data.entity.VirtualCartridgeEntity
@@ -13,6 +16,9 @@ import com.example.storage.SupContainerProcessor
 import com.example.storage.VirtualStorageManager
 import com.example.storage.VirtualStorageStats
 import com.example.storage.LibraryScannerService
+import com.example.storage.LegalRomScannerService
+import com.example.storage.RomScanSummary
+import com.example.storage.ScannedRomResult
 import com.example.system.HardwareInspector
 import com.example.system.RealHardwareInfo
 import kotlinx.coroutines.Dispatchers
@@ -27,9 +33,59 @@ class SwtcRepository(
     private val context: Context,
     private val dao: SwtcDao
 ) {
+    private val gameFileDao: GameFileDao = SwtcDatabase.getDatabase(context).gameFileDao()
     private val storageManager = VirtualStorageManager(context)
     private val supProcessor = SupContainerProcessor(context)
     private val libraryScanner = LibraryScannerService(context, dao)
+    private val legalRomScanner = LegalRomScannerService(context, dao)
+
+    // ==========================================
+    // IMPORTED GAME FILE / ROOM SCHEMA OPERATIONS
+    // ==========================================
+
+    fun getAllGameFilesFlow(): Flow<List<ImportedGameFileEntity>> = gameFileDao.getAllGameFilesFlow()
+
+    fun getGameFilesByFormatFlow(format: String): Flow<List<ImportedGameFileEntity>> = gameFileDao.getGameFilesByFormatFlow(format)
+
+    fun getFavoriteGameFilesFlow(): Flow<List<ImportedGameFileEntity>> = gameFileDao.getFavoriteGameFilesFlow()
+
+    fun searchGameFilesFlow(query: String): Flow<List<ImportedGameFileEntity>> = gameFileDao.searchGameFilesFlow(query)
+
+    suspend fun getGameFileById(id: String): ImportedGameFileEntity? = withContext(Dispatchers.IO) {
+        gameFileDao.getGameFileById(id)
+    }
+
+    suspend fun getGameFileByTitleId(titleId: String): ImportedGameFileEntity? = withContext(Dispatchers.IO) {
+        gameFileDao.getGameFileByTitleId(titleId)
+    }
+
+    suspend fun insertGameFile(gameFile: ImportedGameFileEntity) = withContext(Dispatchers.IO) {
+        gameFileDao.insertGameFile(gameFile)
+    }
+
+    suspend fun insertGameFiles(gameFiles: List<ImportedGameFileEntity>) = withContext(Dispatchers.IO) {
+        gameFileDao.insertGameFiles(gameFiles)
+    }
+
+    suspend fun updateGameFile(gameFile: ImportedGameFileEntity) = withContext(Dispatchers.IO) {
+        gameFileDao.updateGameFile(gameFile)
+    }
+
+    suspend fun setGameFileFavorite(id: String, isFavorite: Boolean) = withContext(Dispatchers.IO) {
+        gameFileDao.setFavorite(id, isFavorite)
+    }
+
+    suspend fun updateGameFilePlayTime(id: String, timestamp: Long, additionalMinutes: Long) = withContext(Dispatchers.IO) {
+        gameFileDao.updatePlayTime(id, timestamp, additionalMinutes)
+    }
+
+    suspend fun deleteGameFileById(id: String) = withContext(Dispatchers.IO) {
+        gameFileDao.deleteGameFileById(id)
+    }
+
+    suspend fun clearAllGameFiles() = withContext(Dispatchers.IO) {
+        gameFileDao.clearAllGameFiles()
+    }
 
     fun getBootConfigFlow(): Flow<BootConfigEntity?> = dao.getBootConfigFlow()
 
@@ -95,6 +151,22 @@ class SwtcRepository(
 
     suspend fun scanAndPopulateLibrary(): Int = withContext(Dispatchers.IO) {
         libraryScanner.scanAndPopulateLibrary()
+    }
+
+    suspend fun scanStorageWithNcaDecryption(
+        customDirs: List<File> = emptyList(),
+        onProgress: (
+            currentPath: String,
+            scannedCount: Int,
+            romCount: Int,
+            decryptedCount: Int,
+            action: String,
+            progress: Float,
+            logLine: String,
+            latestResult: ScannedRomResult?
+        ) -> Unit
+    ): RomScanSummary = withContext(Dispatchers.IO) {
+        legalRomScanner.scanStorageAndDecryptNcas(customDirs, onProgress)
     }
 
     fun getVirtualStorageStats(capacityGb: Int): VirtualStorageStats {

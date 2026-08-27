@@ -414,6 +414,24 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeInitializeVulkan(JNIEnv* en
     return JNI_TRUE;
 }
 
+// Structure to store recorded Maxwell -> Vulkan draw commands
+struct RecordedDrawCommand {
+    uint32_t topology;
+    uint32_t vertexCount;
+    uint32_t firstVertex;
+    uint32_t samplerId;
+    uint64_t textureAddress;
+};
+
+static std::vector<RecordedDrawCommand> pendingDrawCommands;
+static std::mutex drawQueueMutex;
+static uint64_t totalFramesPresented = 0;
+static uint64_t totalDrawCallsRecorded = 0;
+
+// Dynamic viewport and scissor
+static VkViewport currentViewport = {0.0f, 0.0f, 1280.0f, 720.0f, 0.0f, 1.0f};
+static VkRect2D currentScissor = {{0, 0}, {1280, 720}};
+
 // In a real emulator, this function is called repeatedly to translate Maxwell 3D registers into Vulkan Pipeline state
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_emulator_gpu_VulkanTranslator_nativeVkCmdDraw(JNIEnv* env, jobject /* this */, jint topology, jint count, jint first) {
@@ -422,6 +440,19 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeVkCmdDraw(JNIEnv* env, jobj
     // Validate Maxwell Draw Call state & primitive topology against Vulkan spec
     SwtcVulkan::VulkanValidationManager::getInstance().validateMaxwellDraw(
         static_cast<uint32_t>(topology), static_cast<uint32_t>(count), static_cast<uint32_t>(first));
+
+    // Record the draw command into the pending command list for current frame
+    {
+        std::lock_guard<std::mutex> lock(drawQueueMutex);
+        RecordedDrawCommand cmd{};
+        cmd.topology = static_cast<uint32_t>(topology);
+        cmd.vertexCount = static_cast<uint32_t>(count > 0 ? count : 3);
+        cmd.firstVertex = static_cast<uint32_t>(first);
+        cmd.samplerId = 0;
+        cmd.textureAddress = 0;
+        pendingDrawCommands.push_back(cmd);
+        totalDrawCallsRecorded++;
+    }
 
     // Enforce strict frame pacing to maintain 34-60 FPS without stutter
     nativePacer.pace();
@@ -434,6 +465,14 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeVkCmdBindTexture(JNIEnv* en
     // Validate texture sampler alignment and bound memory address
     SwtcVulkan::VulkanValidationManager::getInstance().validateMaxwellTextureBind(
         static_cast<uint32_t>(samplerId), static_cast<uint64_t>(address));
+
+    {
+        std::lock_guard<std::mutex> lock(drawQueueMutex);
+        if (!pendingDrawCommands.empty()) {
+            pendingDrawCommands.back().samplerId = static_cast<uint32_t>(samplerId);
+            pendingDrawCommands.back().textureAddress = static_cast<uint64_t>(address);
+        }
+    }
 
     // Enforce strict frame pacing to maintain 34-60 FPS without stutter
     nativePacer.pace();
@@ -448,13 +487,20 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeSubmitAndPresent(JNIEnv* en
     vkResetFences(vkCtx.logicalDevice, 1, &inFlightFence);
 
     uint32_t imageIndex;
-    vkAcquireNextImageKHR(vkCtx.logicalDevice, vkCtx.swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+    VkResult acquireResult = vkAcquireNextImageKHR(vkCtx.logicalDevice, vkCtx.swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+    if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+        LOGE("Failed to acquire next swapchain image: %d", acquireResult);
+        return;
+    }
 
     // Record Command Buffer for this frame
-    vkResetCommandBuffer(commandBuffers[imageIndex], 0);
+    VkCommandBuffer cmdBuf = commandBuffers[imageIndex];
+    vkResetCommandBuffer(cmdBuf, 0);
+    
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer(commandBuffers[imageIndex], &beginInfo);
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmdBuf, &beginInfo);
 
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -466,12 +512,39 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeSubmitAndPresent(JNIEnv* en
     renderPassInfo.clearValueCount = 1;
     renderPassInfo.pClearValues = &clearColor;
 
-    vkCmdBeginRenderPass(commandBuffers[imageIndex], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    // Draw calls would normally go here based on Maxwell translations!
-    vkCmdEndRenderPass(commandBuffers[imageIndex]);
-    vkEndCommandBuffer(commandBuffers[imageIndex]);
+    vkCmdBeginRenderPass(cmdBuf, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Submit
+    // Setup dynamic viewport and scissor matching swapchain extent
+    currentViewport.x = 0.0f;
+    currentViewport.y = 0.0f;
+    currentViewport.width = static_cast<float>(swapChainExtent.width);
+    currentViewport.height = static_cast<float>(swapChainExtent.height);
+    currentViewport.minDepth = 0.0f;
+    currentViewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmdBuf, 0, 1, &currentViewport);
+
+    currentScissor.offset = {0, 0};
+    currentScissor.extent = swapChainExtent;
+    vkCmdSetScissor(cmdBuf, 0, 1, &currentScissor);
+
+    // Execute genuine recorded draw commands into the Vulkan command buffer
+    {
+        std::lock_guard<std::mutex> lock(drawQueueMutex);
+        if (pendingDrawCommands.empty()) {
+            // Draw a basic full-screen pass if no specific mesh submitted yet
+            vkCmdDraw(cmdBuf, 3, 1, 0, 0);
+        } else {
+            for (const auto& drawCmd : pendingDrawCommands) {
+                vkCmdDraw(cmdBuf, drawCmd.vertexCount, 1, drawCmd.firstVertex, 0);
+            }
+            pendingDrawCommands.clear();
+        }
+    }
+
+    vkCmdEndRenderPass(cmdBuf);
+    vkEndCommandBuffer(cmdBuf);
+
+    // Submit to Graphics Queue
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphore};
@@ -480,7 +553,7 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeSubmitAndPresent(JNIEnv* en
     submitInfo.pWaitSemaphores = waitSemaphores;
     submitInfo.pWaitDstStageMask = waitStages;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
+    submitInfo.pCommandBuffers = &cmdBuf;
     VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
@@ -489,7 +562,7 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeSubmitAndPresent(JNIEnv* en
         LOGE("Failed to submit draw command buffer!");
     }
 
-    // Present
+    // Present to Android Native Window Swapchain
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -499,7 +572,10 @@ Java_com_example_emulator_gpu_VulkanTranslator_nativeSubmitAndPresent(JNIEnv* en
     presentInfo.pSwapchains = swapChains;
     presentInfo.pImageIndices = &imageIndex;
 
-    vkQueuePresentKHR(vkCtx.graphicsQueue, &presentInfo);
+    VkResult presentResult = vkQueuePresentKHR(vkCtx.graphicsQueue, &presentInfo);
+    if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        totalFramesPresented++;
+    }
 
     nativePacer.pace();
 }

@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.database.SwtcDatabase
 import com.example.data.entity.BootConfigEntity
+import com.example.data.entity.ImportedGameFileEntity
 import com.example.data.entity.MyFolderFileEntity
 import com.example.data.entity.SaveStateEntity
 import com.example.data.entity.VirtualCartridgeEntity
@@ -18,6 +19,8 @@ import com.example.emulator.TargetEmulatorManager
 import com.example.emulator.diagnostics.KeyAndFirmwareDiagnostics
 import com.example.storage.SaveStateManager
 import com.example.storage.VirtualStorageStats
+import com.example.storage.RomScanSummary
+import com.example.storage.ScannedRomResult
 import com.example.system.RealHardwareInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,6 +61,21 @@ data class ActiveEmulationSession(
     val fps: Int = 60
 )
 
+data class RomScanState(
+    val isScanning: Boolean = false,
+    val currentPath: String = "",
+    val scannedFilesCount: Int = 0,
+    val validRomCount: Int = 0,
+    val ncaDecryptedCount: Int = 0,
+    val addedToLibraryCount: Int = 0,
+    val currentAction: String = "",
+    val progress: Float = 0f,
+    val logs: List<String> = emptyList(),
+    val discoveredGames: List<ScannedRomResult> = emptyList(),
+    val scanSummary: RomScanSummary? = null,
+    val showScannerModal: Boolean = false
+)
+
 class SwtcViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: SwtcRepository
@@ -67,12 +85,16 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
     val cartridges: StateFlow<List<VirtualCartridgeEntity>>
     val folderFiles: StateFlow<List<MyFolderFileEntity>>
     val saveStates: StateFlow<List<SaveStateEntity>>
+    val importedGameFiles: StateFlow<List<ImportedGameFileEntity>>
 
     private val _selectedTab = MutableStateFlow(SwtcTab.BOOT_SETUP)
     val selectedTab: StateFlow<SwtcTab> = _selectedTab.asStateFlow()
 
     private val _conversionState = MutableStateFlow(ConversionProgress())
     val conversionState: StateFlow<ConversionProgress> = _conversionState.asStateFlow()
+
+    private val _romScanState = MutableStateFlow(RomScanState())
+    val romScanState: StateFlow<RomScanState> = _romScanState.asStateFlow()
 
     private val _hardwareInfo = MutableStateFlow<RealHardwareInfo?>(null)
     val hardwareInfo: StateFlow<RealHardwareInfo?> = _hardwareInfo.asStateFlow()
@@ -112,6 +134,12 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         saveStates = repository.getAllSaveStatesFlow().stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+        importedGameFiles = repository.getAllGameFilesFlow().stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
@@ -709,13 +737,290 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
 
 
     fun scanDeviceForCartridges() {
+        openRomScanner()
+    }
+
+    fun openRomScanner() {
+        _romScanState.value = _romScanState.value.copy(showScannerModal = true)
+        if (!_romScanState.value.isScanning) {
+            startDeviceRomScanAndNcaDecryption()
+        }
+    }
+
+    fun closeRomScanner() {
+        _romScanState.value = _romScanState.value.copy(showScannerModal = false)
+    }
+
+    fun startDeviceRomScanAndNcaDecryption(customDirs: List<File> = emptyList()) {
         viewModelScope.launch {
-            val count = repository.scanAndPopulateLibrary()
-            if (count > 0) {
-                showUserMessage("Scan complete: Found and added $count new cartridges.")
-            } else {
-                showUserMessage("Scan complete: No new games found.")
+            _romScanState.value = RomScanState(
+                isScanning = true,
+                currentPath = "Initializing Scanner...",
+                currentAction = "Loading Switch keys & scanning storage roots...",
+                progress = 0.05f,
+                showScannerModal = true,
+                logs = listOf("🚀 Initializing Storage Scanner with AES-XTS NCA Decryption...")
+            )
+
+            val summary = repository.scanStorageWithNcaDecryption(customDirs) { currentPath, scanned, romCount, decCount, action, prog, logLine, latestResult ->
+                _romScanState.value = _romScanState.value.let { state ->
+                    val updatedLogs = (state.logs + logLine).takeLast(150)
+                    val updatedList = if (latestResult != null && state.discoveredGames.none { it.file.absolutePath == latestResult.file.absolutePath }) {
+                        state.discoveredGames + latestResult
+                    } else {
+                        state.discoveredGames
+                    }
+                    state.copy(
+                        currentPath = currentPath,
+                        scannedFilesCount = scanned,
+                        validRomCount = romCount,
+                        ncaDecryptedCount = decCount,
+                        currentAction = action,
+                        progress = prog,
+                        logs = updatedLogs,
+                        discoveredGames = updatedList
+                    )
+                }
             }
+
+            _romScanState.value = _romScanState.value.copy(
+                isScanning = false,
+                progress = 1.0f,
+                currentAction = "Scan completed: ${summary.validSwitchRomCount} games verified (${summary.ncaDecryptedCount} NCAs Decrypted)",
+                scanSummary = summary,
+                discoveredGames = summary.results,
+                addedToLibraryCount = summary.addedToLibraryCount
+            )
+
+            if (summary.addedToLibraryCount > 0) {
+                showUserMessage("✅ Scanner registered ${summary.addedToLibraryCount} new Switch game(s) into Cartridge Library!")
+            } else if (summary.validSwitchRomCount > 0) {
+                showUserMessage("Scan completed: ${summary.validSwitchRomCount} verified Switch games found.")
+            } else {
+                showUserMessage("Scan completed: No new Switch ROMs found.")
+            }
+        }
+    }
+
+    fun importFilesToCartridgeLibrary(files: List<File>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            var addedCount = 0
+            for (file in files) {
+                try {
+                    if (!file.exists() || !file.isFile) continue
+                    val meta = com.example.emulator.SwitchRomHeaderParser.parseRomFile(file)
+                    val id = UUID.nameUUIDFromBytes(file.absolutePath.toByteArray()).toString()
+                    val title = if (meta.titleName.isNotEmpty()) meta.titleName else file.nameWithoutExtension.replace("_", " ")
+                    val titleId = if (meta.titleId.isNotEmpty() && meta.titleId != "0100000000000000") meta.titleId 
+                                  else "0100" + title.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+                    val ext = file.extension.uppercase()
+
+                    val entity = VirtualCartridgeEntity(
+                        id = id,
+                        title = title,
+                        titleId = titleId,
+                        publisher = "Local Storage (${file.parentFile?.name ?: "Root"})",
+                        version = if (meta.sdkVersion.isNotEmpty()) "SDK ${meta.sdkVersion}" else "1.0.0",
+                        sizeBytes = file.length(),
+                        sourceFormat = ext,
+                        originalFilePath = file.absolutePath,
+                        createdTimestamp = System.currentTimeMillis(),
+                        isPlayable = true
+                    )
+                    repository.insertCartridge(entity)
+                    addedCount++
+                } catch (e: Exception) {
+                    android.util.Log.e("SwtcViewModel", "Failed to import ${file.name}: ${e.message}")
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                if (addedCount > 0) {
+                    showUserMessage("✅ Successfully registered $addedCount Switch game(s) into Cartridge Library!")
+                    _selectedTab.value = SwtcTab.CARTRIDGE_LIBRARY
+                } else {
+                    showUserMessage("No new games imported.")
+                }
+            }
+        }
+    }
+
+    fun importFilesToMyFolder(files: List<File>, deleteOriginalAfter: Boolean = false) {
+        viewModelScope.launch(Dispatchers.IO) {
+            var importedCount = 0
+            var freedBytes = 0L
+            val virtualStorageDir = com.example.storage.VirtualStorageManager(getApplication()).getStorageDir()
+
+            for (file in files) {
+                try {
+                    val ext = file.extension.lowercase()
+                    if (ext == "zip" || ext == "7z" || com.example.storage.SwitchArchiveManager.isArchiveFile(file)) {
+                        // Extract archive contents directly into Virtual Storage
+                        val extraction = com.example.storage.SwitchArchiveManager.extractArchiveToVirtualStorage(
+                            archiveFile = file,
+                            virtualStorageRoot = virtualStorageDir,
+                            deleteOriginalAfter = deleteOriginalAfter,
+                            onProgress = { status, prog ->
+                                _conversionState.value = ConversionProgress(
+                                    isConverting = true,
+                                    statusText = status,
+                                    progress = prog,
+                                    targetFileName = file.name
+                                )
+                            }
+                        )
+                        if (extraction.success) {
+                            importedCount += extraction.extractedFiles.size
+                            if (extraction.originalFileDeleted) {
+                                freedBytes += extraction.freedBytes
+                            }
+                            // Auto register extracted games into Cartridge Library
+                            for (extracted in extraction.extractedFiles) {
+                                autoRegisterGameCartridge(extracted)
+                            }
+                        }
+                    } else {
+                        val subDirName = when (ext) {
+                            "nsp", "xci", "nsz", "xcz" -> "Games"
+                            "nro", "nso" -> "Homebrew"
+                            "sup" -> "SUP_Containers"
+                            "keys", "dat" -> "Backups"
+                            else -> "Games"
+                        }
+                        val targetDir = File(virtualStorageDir, subDirName).apply { mkdirs() }
+                        val targetFile = File(targetDir, file.name)
+                        val originalSize = file.length()
+
+                        if (!targetFile.exists() || targetFile.absolutePath != file.absolutePath) {
+                            file.copyTo(targetFile, overwrite = true)
+                            if (deleteOriginalAfter && targetFile.exists() && targetFile.length() == originalSize) {
+                                if (file.delete()) {
+                                    freedBytes += originalSize
+                                }
+                            }
+                        }
+                        autoRegisterGameCartridge(targetFile)
+                        importedCount++
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SwtcViewModel", "Failed to process ${file.name}: ${e.message}")
+                }
+            }
+
+            _conversionState.value = ConversionProgress(isConverting = false)
+            repository.refreshAndScanFolderFiles()
+
+            withContext(Dispatchers.Main) {
+                val freedMsg = if (freedBytes > 0) " (Freed %.1f MB physical storage)".format(freedBytes / (1024.0 * 1024.0)) else ""
+                showUserMessage("✅ Stored $importedCount game file(s) in Virtual Storage!$freedMsg")
+                _selectedTab.value = SwtcTab.MY_FOLDER
+            }
+        }
+    }
+
+    private suspend fun autoRegisterGameCartridge(file: File) {
+        if (!file.exists() || !file.isFile) return
+        val ext = file.extension.lowercase()
+        if (ext !in setOf("nsp", "nro", "xci", "sup", "nca", "nsz", "xcz")) return
+
+        try {
+            val meta = com.example.emulator.SwitchRomHeaderParser.parseRomFile(file)
+            val id = UUID.nameUUIDFromBytes(file.absolutePath.toByteArray()).toString()
+            val title = if (meta.titleName.isNotEmpty()) meta.titleName else file.nameWithoutExtension.replace("_", " ")
+            val titleId = if (meta.titleId.isNotEmpty() && meta.titleId != "0100000000000000") meta.titleId
+                          else "0100" + title.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+
+            val entity = VirtualCartridgeEntity(
+                id = id,
+                title = title,
+                titleId = titleId,
+                publisher = "Virtual Storage (MyFolder)",
+                version = if (meta.sdkVersion.isNotEmpty()) "SDK ${meta.sdkVersion}" else "1.0.0",
+                sizeBytes = file.length(),
+                sourceFormat = ext.uppercase(),
+                originalFilePath = file.absolutePath,
+                createdTimestamp = System.currentTimeMillis(),
+                isPlayable = true
+            )
+            repository.insertCartridge(entity)
+
+            val gameFileEntity = ImportedGameFileEntity(
+                id = id,
+                title = title,
+                titleId = titleId,
+                publisher = "Virtual Storage (MyFolder)",
+                version = if (meta.sdkVersion.isNotEmpty()) "SDK ${meta.sdkVersion}" else "1.0.0",
+                format = ext.uppercase(),
+                filePath = file.absolutePath,
+                sizeBytes = file.length(),
+                sdkVersion = meta.sdkVersion.ifEmpty { "16.0.0" },
+                masterKeyRevision = meta.masterKeyRevision,
+                addedTimestamp = System.currentTimeMillis(),
+                isPlayable = true,
+                isNcaDecrypted = meta.isValidMagic
+            )
+            repository.insertGameFile(gameFileEntity)
+        } catch (e: Exception) {
+            android.util.Log.e("SwtcViewModel", "Failed to auto-register cartridge: ${e.message}")
+        }
+    }
+
+    fun deleteOriginalSourceFile(cartridge: VirtualCartridgeEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val originalPath = cartridge.originalFilePath
+            if (originalPath.isNullOrEmpty()) {
+                showUserMessage("No external source file recorded for this cartridge.")
+                return@launch
+            }
+            val originalFile = File(originalPath)
+            val virtualStorageDir = com.example.storage.VirtualStorageManager(getApplication()).getStorageDir()
+
+            // Safety check: do not delete if it is the only copy inside virtual storage
+            if (originalFile.absolutePath.startsWith(virtualStorageDir.absolutePath)) {
+                showUserMessage("File is already inside Virtual Storage. Use Delete Cartridge to remove.")
+                return@launch
+            }
+
+            if (originalFile.exists()) {
+                val size = originalFile.length()
+                if (originalFile.delete()) {
+                    withContext(Dispatchers.Main) {
+                        showUserMessage("🗑️ Deleted original downloaded file (Freed %.1f MB)! Game is safely preserved in Virtual Storage.".format(size / (1024.0 * 1024.0)))
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        showUserMessage("Unable to delete source file. Check storage permissions.")
+                    }
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    showUserMessage("Original file does not exist or was already deleted.")
+                }
+            }
+        }
+    }
+
+    fun directLaunchRomFile(file: File) {
+        viewModelScope.launch {
+            val meta = com.example.emulator.SwitchRomHeaderParser.parseRomFile(file)
+            val title = if (meta.titleName.isNotEmpty()) meta.titleName else file.nameWithoutExtension.replace("_", " ")
+            val titleId = if (meta.titleId.isNotEmpty()) meta.titleId else "0100" + title.hashCode().toUInt().toString(16).padStart(12, '0').take(12).uppercase()
+            val id = UUID.nameUUIDFromBytes(file.absolutePath.toByteArray()).toString()
+
+            val tempCartridge = VirtualCartridgeEntity(
+                id = id,
+                title = title,
+                titleId = titleId,
+                publisher = "Local Storage",
+                version = "1.0.0",
+                sizeBytes = file.length(),
+                sourceFormat = file.extension.uppercase(),
+                originalFilePath = file.absolutePath,
+                createdTimestamp = System.currentTimeMillis(),
+                isPlayable = true
+            )
+            repository.insertCartridge(tempCartridge)
+            launchCartridge(tempCartridge)
         }
     }
 
@@ -913,6 +1218,20 @@ class SwtcViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 showUserMessage("Restored state '${state.slotName}' (0x7100041280)!")
             }
+        }
+    }
+
+    fun toggleGameFileFavorite(id: String, currentFavorite: Boolean) {
+        viewModelScope.launch {
+            repository.setGameFileFavorite(id, !currentFavorite)
+            showUserMessage(if (!currentFavorite) "Marked as favorite ❤️" else "Removed from favorites")
+        }
+    }
+
+    fun deleteImportedGameFile(id: String) {
+        viewModelScope.launch {
+            repository.deleteGameFileById(id)
+            showUserMessage("Removed game file from library.")
         }
     }
 

@@ -178,38 +178,63 @@ object KeyAndFirmwareDiagnostics {
             )
         }
 
-        // 4. Cipher Execution Test
+        // 4. NCA Header AES-XTS Cryptographic Execution Test
         totalWeight += 15
         try {
-            val sampleHeader = ByteArray(0xC00)
-            sampleHeader[0x200] = 'N'.code.toByte()
-            sampleHeader[0x201] = 'C'.code.toByte()
-            sampleHeader[0x202] = 'A'.code.toByte()
-            sampleHeader[0x203] = '3'.code.toByte()
+            val testHeaderKey = keySet.headerKey ?: ByteArray(32) { (it * 7 + 3).toByte() }
+            val key1 = testHeaderKey.copyOfRange(0, 16)
+            val key2 = testHeaderKey.copyOfRange(16, 32)
 
-            val testHeaderKey = keySet.headerKey ?: ByteArray(32) { 0x4A }
-            val decryptedHeader = KeyManager.decryptNcaHeader(sampleHeader, testHeaderKey)
-            if (decryptedHeader != null && decryptedHeader.size >= 0x400) {
+            // 1. Prepare standard plaintext NCA header (0xC00 bytes with NCA3 Magic at 0x200)
+            val plainHeader = ByteArray(0xC00)
+            plainHeader[0x200] = 'N'.code.toByte()
+            plainHeader[0x201] = 'C'.code.toByte()
+            plainHeader[0x202] = 'A'.code.toByte()
+            plainHeader[0x203] = '3'.code.toByte()
+            plainHeader[0x204] = 0x00 // Distribution type
+            plainHeader[0x205] = 0x00 // Program Content
+            plainHeader[0x206] = 0x01 // Master key rev 1
+
+            // 2. Encrypt header with AES-XTS (Simulating authentic commercial encrypted NCA dump)
+            val encryptedHeader = KeyManager.encryptAesXts(
+                data = plainHeader,
+                offset = 0,
+                length = 0xC00,
+                key1 = key1,
+                key2 = key2,
+                sectorSize = 0x200,
+                startSectorIndex = 0L
+            )
+
+            // 3. Decrypt header through the primary decryptNcaHeader pipeline
+            val decryptedHeader = KeyManager.decryptNcaHeader(encryptedHeader, testHeaderKey)
+            val dm0 = decryptedHeader[0x200].toInt() and 0xFF
+            val dm1 = decryptedHeader[0x201].toInt() and 0xFF
+            val dm2 = decryptedHeader[0x202].toInt() and 0xFF
+            val dm3 = decryptedHeader[0x203].toInt() and 0xFF
+            val magic = "${dm0.toChar()}${dm1.toChar()}${dm2.toChar()}${dm3.toChar()}"
+
+            if (magic == "NCA3" && decryptedHeader.size >= 0xC00) {
                 totalPassed += 15
                 checks.add(
                     DiagnosticCheckItem(
                         category = "Cryptographic Execution",
-                        name = "AES-XTS Header Decryption Cipher Test",
+                        name = "NCA Header AES-XTS Decryption Engine",
                         status = DiagnosticStatus.PASS,
-                        detailMessage = "AES-XTS hardware cipher execution completed cleanly.",
-                        expected = "NCA3 Magic intact",
-                        actual = "Success"
+                        detailMessage = "✅ 100% OK: AES-XTS NCA Header Decryption verified with active 32-byte header_key (NCA3 Magic intact).",
+                        expected = "NCA3 Magic (0x200)",
+                        actual = "Decrypted 'NCA3' Magic OK"
                     )
                 )
             } else {
                 checks.add(
                     DiagnosticCheckItem(
                         category = "Cryptographic Execution",
-                        name = "AES-XTS Header Decryption Cipher Test",
+                        name = "NCA Header AES-XTS Decryption Engine",
                         status = DiagnosticStatus.FAIL,
-                        detailMessage = "Cipher execution test produced null or short output.",
-                        expected = "0xC00 block",
-                        actual = "Failed"
+                        detailMessage = "Cipher execution test produced unexpected magic: $magic",
+                        expected = "NCA3 Magic",
+                        actual = magic
                     )
                 )
             }
@@ -217,11 +242,11 @@ object KeyAndFirmwareDiagnostics {
             checks.add(
                 DiagnosticCheckItem(
                     category = "Cryptographic Execution",
-                    name = "AES-XTS Header Decryption Cipher Test",
-                    status = DiagnosticStatus.WARNING,
-                    detailMessage = "Cipher execution note: ${e.message}",
+                    name = "NCA Header AES-XTS Decryption Engine",
+                    status = DiagnosticStatus.FAIL,
+                    detailMessage = "NCA Header Decryption failed: ${e.message}",
                     expected = "Clean execution",
-                    actual = "Exception"
+                    actual = "Exception: ${e.message}"
                 )
             )
         }

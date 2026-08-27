@@ -1,9 +1,13 @@
 package com.example
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
@@ -33,6 +37,7 @@ import com.example.ui.screens.VirtualStorageScreen
 import com.example.ui.screens.WebEnvironmentScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.components.DiagnosticToolDialog
+import com.example.ui.components.RomScannerDialog
 import com.example.emulator.settings.EmulatorSettingsManager
 import com.example.ui.theme.SwtcNoosTheme
 import com.example.viewmodel.SwtcTab
@@ -63,8 +68,31 @@ class MainActivity : ComponentActivity() {
                 val coreState by viewModel.coreEngineState.collectAsStateWithLifecycle()
                 val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
                 val diagnosticReport by viewModel.diagnosticReport.collectAsStateWithLifecycle()
+                val romScanState by viewModel.romScanState.collectAsStateWithLifecycle()
 
                 val snackbarHostState = remember { SnackbarHostState() }
+
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestMultiplePermissions()
+                ) { /* permissions granted */ }
+
+                LaunchedEffect(Unit) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.READ_MEDIA_IMAGES,
+                                Manifest.permission.READ_MEDIA_VIDEO
+                            )
+                        )
+                    } else {
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.READ_EXTERNAL_STORAGE,
+                                Manifest.permission.WRITE_EXTERNAL_STORAGE
+                            )
+                        )
+                    }
+                }
 
                 LaunchedEffect(userMessage) {
                     userMessage?.let { msg ->
@@ -137,7 +165,10 @@ class MainActivity : ComponentActivity() {
                                         onConvertToCartridge = { file -> viewModel.convertFileToCartridge(file) },
                                         onCreateSampleFile = { name, format, sizeMb ->
                                             viewModel.createSampleGameInMyFolder(name, format, sizeMb)
-                                        }
+                                        },
+                                        onImportLocalFiles = { files -> viewModel.importFilesToMyFolder(files) },
+                                        onDirectLaunchFile = { file -> viewModel.directLaunchRomFile(file) },
+                                        onScanStorage = { viewModel.openRomScanner() }
                                     )
 
                                     SwtcTab.CARTRIDGE_LIBRARY -> CartridgeLibraryScreen(
@@ -146,7 +177,9 @@ class MainActivity : ComponentActivity() {
                                         onDeleteCartridge = { id -> viewModel.deleteCartridge(id) },
                                         onGoToMyFolder = { viewModel.selectTab(SwtcTab.MY_FOLDER) },
                                         onGoToSaveStates = { viewModel.selectTab(SwtcTab.SAVE_STATES) },
-                                        onScanDevice = { viewModel.scanDeviceForCartridges() }
+                                        onScanDevice = { viewModel.scanDeviceForCartridges() },
+                                        onImportFiles = { files -> viewModel.importFilesToCartridgeLibrary(files) },
+                                        onDirectLaunchFile = { file -> viewModel.directLaunchRomFile(file) }
                                     )
 
                                     SwtcTab.SAVE_STATES -> SaveStatesScreen(
@@ -209,6 +242,18 @@ class MainActivity : ComponentActivity() {
                                 onQuickFixKeys = { viewModel.quickLoad100PercentKeys() },
                                 onQuickFixFirmware = { viewModel.quickLoad100PercentFirmware() }
                             )
+
+                            if (romScanState.showScannerModal) {
+                                RomScannerDialog(
+                                    scanState = romScanState,
+                                    onDismiss = { viewModel.closeRomScanner() },
+                                    onStartScan = { viewModel.startDeviceRomScanAndNcaDecryption() },
+                                    onLaunchGame = { file ->
+                                        viewModel.closeRomScanner()
+                                        viewModel.directLaunchRomFile(file)
+                                    }
+                                )
+                            }
                         }
                     }
                 }

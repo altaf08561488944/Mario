@@ -25,6 +25,10 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.foundation.layout.PaddingValues
+import com.example.ui.components.SwitchFilePickerDialog
+import java.io.File
 import androidx.compose.material.icons.filled.Games
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.MoreVert
@@ -78,10 +82,14 @@ fun MyFolderScreen(
     onRefresh: () -> Unit,
     onConvertToSup: (MyFolderFileEntity) -> Unit,
     onConvertToCartridge: (MyFolderFileEntity) -> Unit,
-    onCreateSampleFile: (String, String, Int) -> Unit
+    onCreateSampleFile: (String, String, Int) -> Unit,
+    onImportLocalFiles: (List<File>) -> Unit = {},
+    onDirectLaunchFile: (File) -> Unit = {},
+    onScanStorage: (() -> Unit)? = null
 ) {
     var selectedFileForAction by remember { mutableStateOf<MyFolderFileEntity?>(null) }
     var showAddSampleDialog by remember { mutableStateOf(false) }
+    var showFilePicker by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -101,7 +109,7 @@ fun MyFolderScreen(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.Folder,
+                        imageVector = Icons.Default.FolderOpen,
                         contentDescription = "My Folder",
                         tint = NeonGreen,
                         modifier = Modifier.size(32.dp)
@@ -124,11 +132,42 @@ fun MyFolderScreen(
                     }
                 }
 
-                IconButton(
-                    onClick = onRefresh,
-                    modifier = Modifier.testTag("refresh_folder_button")
-                ) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = NeonBlue)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (onScanStorage != null) {
+                        Button(
+                            onClick = onScanStorage,
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonRed, contentColor = Color.White),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.height(34.dp).testTag("my_folder_scan_storage_button")
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Scan ROMs", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+
+                    Button(
+                        onClick = { showFilePicker = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonBlue, contentColor = Color.Black),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.height(34.dp).testTag("my_folder_browse_storage_button")
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Browse", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    IconButton(
+                        onClick = onRefresh,
+                        modifier = Modifier.testTag("refresh_folder_button")
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = NeonBlue)
+                    }
                 }
             }
 
@@ -204,13 +243,24 @@ fun MyFolderScreen(
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
                         Spacer(modifier = Modifier.height(20.dp))
-                        Button(
-                            onClick = { showAddSampleDialog = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = NeonBlue)
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Create Sample Game/File", color = Color.Black)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { showFilePicker = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black)
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Browse Storage (.nsp / .nro)", fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = { showAddSampleDialog = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonBlue)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sample File", color = Color.Black)
+                            }
                         }
                     }
                 }
@@ -233,7 +283,7 @@ fun MyFolderScreen(
 
         // FAB to add sample files or import
         FloatingActionButton(
-            onClick = { showAddSampleDialog = true },
+            onClick = { showFilePicker = true },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(24.dp)
@@ -241,7 +291,7 @@ fun MyFolderScreen(
             containerColor = NeonRed,
             contentColor = Color.White
         ) {
-            Icon(Icons.Default.Add, contentDescription = "Add File")
+            Icon(Icons.Default.FolderOpen, contentDescription = "Browse Files")
         }
 
         // File Action Dialog (OPEN, CONVERT TO .SUP, CONVERT TO CARTRIDGE)
@@ -267,6 +317,21 @@ fun MyFolderScreen(
                 onCreate = { name, format, sizeMb ->
                     showAddSampleDialog = false
                     onCreateSampleFile(name, format, sizeMb)
+                }
+            )
+        }
+
+        // Switch File Picker Modal
+        if (showFilePicker) {
+            SwitchFilePickerDialog(
+                onDismiss = { showFilePicker = false },
+                onImportFilesToMyFolder = { files ->
+                    showFilePicker = false
+                    onImportLocalFiles(files)
+                },
+                onDirectLaunch = { file ->
+                    showFilePicker = false
+                    onDirectLaunchFile(file)
                 }
             )
         }

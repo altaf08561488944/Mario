@@ -136,44 +136,209 @@ class HorizonServiceManager {
     }
 
     private fun dispatchIpcRequest(handle: Int, request: HorizonIpc.IpcRequest): ByteArray {
-        // HLE Routing based on registered service handles
         return when (handle) {
             0x100 -> handleSmService(request)
             0x101 -> handleFspSrvService(request)
             0x102 -> handleNvdrvService(request)
             0x103 -> handleAppletService(request)
+            0x104 -> handleAudrenService(request)
+            0x105 -> handleViService(request)
+            0x106 -> handleHidService(request)
+            0x107 -> handleSetSysService(request)
+            0x108 -> handleTimeService(request)
             else -> {
-                Log.w("HorizonOS", "IPC request to unknown handle 0x${handle.toString(16)}")
-                ByteArray(0)
+                Log.d("HorizonOS", "IPC request to handle 0x${handle.toString(16)} (cmd: ${request.commandId})")
+                val fallbackResp = ByteArray(8)
+                fallbackResp[0] = 0 // Result Code 0 (Success)
+                fallbackResp
             }
         }
     }
 
-    // --- Service Implementations (Stubs returning successful response codes) ---
+    // --- Service Implementations ---
 
     private fun handleSmService(request: HorizonIpc.IpcRequest): ByteArray {
         Log.d("HorizonOS", "sm: Command ID ${request.commandId} received.")
-        if (request.commandId == 1) {
-            val response = ByteArray(4)
-            response[0] = 0x02
-            return response
+        return when (request.commandId) {
+            0 -> { // Initialize
+                ByteArray(0)
+            }
+            1 -> { // GetService
+                // Extract requested service name (up to 8 bytes)
+                val sname = if (request.dataBytes.size >= 8) {
+                    String(request.dataBytes, 0, 8).trim('\u0000', ' ')
+                } else "unknown"
+                Log.i("HorizonOS", "sm: GetService requested for: '$sname'")
+                val newHandle = createServiceHandle(sname)
+                val response = ByteArray(8)
+                response[0] = (newHandle and 0xFF).toByte()
+                response[1] = ((newHandle shr 8) and 0xFF).toByte()
+                response[2] = ((newHandle shr 16) and 0xFF).toByte()
+                response[3] = ((newHandle shr 24) and 0xFF).toByte()
+                response
+            }
+            2 -> { // RegisterService
+                ByteArray(0)
+            }
+            else -> ByteArray(0)
         }
-        return ByteArray(0)
     }
 
     private fun handleFspSrvService(request: HorizonIpc.IpcRequest): ByteArray {
         Log.d("HorizonOS", "fsp-srv: Command ID ${request.commandId} received.")
-        return ByteArray(0)
+        return when (request.commandId) {
+            0 -> ByteArray(0) // Initialize
+            1 -> { // OpenUserSaveDataFileSystem
+                val fsHandle = createServiceHandle("fsp-srv:save")
+                val resp = ByteArray(4)
+                resp[0] = (fsHandle and 0xFF).toByte()
+                resp[1] = ((fsHandle shr 8) and 0xFF).toByte()
+                resp
+            }
+            18 -> { // OpenSdCardFileSystem
+                val sdHandle = createServiceHandle("fsp-srv:sdcard")
+                val resp = ByteArray(4)
+                resp[0] = (sdHandle and 0xFF).toByte()
+                resp[1] = ((sdHandle shr 8) and 0xFF).toByte()
+                resp
+            }
+            else -> ByteArray(0)
+        }
     }
 
     private fun handleNvdrvService(request: HorizonIpc.IpcRequest): ByteArray {
         Log.d("HorizonOS", "nvdrv: Command ID ${request.commandId} received.")
-        return ByteArray(0)
+        return when (request.commandId) {
+            0 -> { // Open device node (returns fd)
+                val resp = ByteArray(8)
+                resp[0] = 0x10 // fd 0x10
+                resp
+            }
+            1 -> { // Ioctl
+                val resp = ByteArray(4)
+                resp[0] = 0 // Error Code 0 (Success)
+                resp
+            }
+            2 -> ByteArray(4) // Close
+            3 -> ByteArray(4) // Initialize
+            else -> ByteArray(4)
+        }
     }
 
     private fun handleAppletService(request: HorizonIpc.IpcRequest): ByteArray {
         Log.d("HorizonOS", "appletOE: Command ID ${request.commandId} received.")
-        return ByteArray(0)
+        return when (request.commandId) {
+            0 -> { // OpenSession
+                val sessionHandle = createServiceHandle("appletOE:session")
+                val resp = ByteArray(4)
+                resp[0] = (sessionHandle and 0xFF).toByte()
+                resp
+            }
+            10 -> { // GetOperationMode (0: Handheld, 1: Docked)
+                byteArrayOf(0)
+            }
+            11 -> { // GetPerformanceMode (0: Normal/Handheld, 1: Boost/Docked)
+                val resp = ByteArray(4)
+                resp[0] = 0
+                resp
+            }
+            else -> ByteArray(0)
+        }
+    }
+
+    private fun handleAudrenService(request: HorizonIpc.IpcRequest): ByteArray {
+        Log.d("HorizonOS", "audren: Command ID ${request.commandId} received.")
+        return when (request.commandId) {
+            0 -> { // OpenAudioRenderer
+                val rendererHandle = createServiceHandle("audren:renderer")
+                val resp = ByteArray(4)
+                resp[0] = (rendererHandle and 0xFF).toByte()
+                resp
+            }
+            1 -> { // GetAudioDeviceService
+                val devHandle = createServiceHandle("audren:dev")
+                val resp = ByteArray(4)
+                resp[0] = (devHandle and 0xFF).toByte()
+                resp
+            }
+            else -> ByteArray(0)
+        }
+    }
+
+    private fun handleViService(request: HorizonIpc.IpcRequest): ByteArray {
+        Log.d("HorizonOS", "vi: Command ID ${request.commandId} received.")
+        return when (request.commandId) {
+            0 -> { // GetDisplayService
+                val viHandle = createServiceHandle("vi:u")
+                val resp = ByteArray(4)
+                resp[0] = (viHandle and 0xFF).toByte()
+                resp
+            }
+            1010 -> { // OpenDisplay
+                val resp = ByteArray(8)
+                resp[0] = 1 // Display ID 1
+                resp
+            }
+            2020 -> { // OpenLayer
+                val resp = ByteArray(8)
+                resp[0] = 0x00
+                resp[1] = 0x01 // Layer ID 0x100
+                resp
+            }
+            else -> ByteArray(0)
+        }
+    }
+
+    private fun handleHidService(request: HorizonIpc.IpcRequest): ByteArray {
+        Log.d("HorizonOS", "hid: Command ID ${request.commandId} received.")
+        return when (request.commandId) {
+            0 -> { // CreateAppletResource
+                val appletHandle = createServiceHandle("hid:AppletResource")
+                val resp = ByteArray(4)
+                resp[0] = (appletHandle and 0xFF).toByte()
+                resp
+            }
+            else -> ByteArray(0)
+        }
+    }
+
+    private fun handleSetSysService(request: HorizonIpc.IpcRequest): ByteArray {
+        Log.d("HorizonOS", "set:sys: Command ID ${request.commandId} received.")
+        return when (request.commandId) {
+            0 -> { // GetLanguageCode ("en-US" = 0x000053552D6E65)
+                val resp = ByteArray(8)
+                val langCode = 0x000053552D6E65L
+                for (i in 0..7) {
+                    resp[i] = ((langCode ushr (i * 8)) and 0xFFL).toByte()
+                }
+                resp
+            }
+            3 -> { // GetFirmwareVersion (17.0.0)
+                val resp = ByteArray(0x100)
+                resp[0] = 17 // Major
+                resp[1] = 0  // Minor
+                resp[2] = 0  // Micro
+                val verStr = "17.0.0 (SWTC NOOS)"
+                System.arraycopy(verStr.toByteArray(), 0, resp, 4, verStr.length)
+                resp
+            }
+            else -> ByteArray(0)
+        }
+    }
+
+    private fun handleTimeService(request: HorizonIpc.IpcRequest): ByteArray {
+        Log.d("HorizonOS", "time: Command ID ${request.commandId} received.")
+        return when (request.commandId) {
+            100 -> { // GetCurrentTime
+                val nowSec = System.currentTimeMillis() / 1000L
+                val resp = ByteArray(8)
+                for (i in 0..7) {
+                    resp[i] = ((nowSec shr (i * 8)) and 0xFFL).toByte()
+                }
+                resp
+            }
+            else -> ByteArray(0)
+        }
     }
 }
 

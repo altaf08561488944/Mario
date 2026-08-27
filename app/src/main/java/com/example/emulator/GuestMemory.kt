@@ -129,18 +129,53 @@ class GuestMemory {
         }
     }
 
-    // Load binary byte array into Virtual Memory at specified startAddress
-    fun loadBinary(startAddress: Long, data: ByteArray) {
-        for (i in data.indices) {
-            write8(startAddress + i, data[i].toInt() and 0xFF)
+    // Load binary byte array into Virtual Memory at specified startAddress with fast block transfers
+    fun loadBinary(startAddress: Long, data: ByteArray, srcOffset: Int = 0, length: Int = data.size - srcOffset) {
+        var bytesRemaining = length.coerceAtMost(data.size - srcOffset)
+        var currentSrcOffset = srcOffset
+        var currentDstAddr = startAddress
+
+        while (bytesRemaining > 0) {
+            val offsetInChunk = (currentDstAddr and 0xFFFFL).toInt()
+            val spaceInChunk = CHUNK_SIZE - offsetInChunk
+            val toWrite = minOf(bytesRemaining, spaceInChunk)
+
+            val (buffer, _) = resolveAddress(currentDstAddr, createIfMissing = true) ?: break
+            val prevPos = buffer.position()
+            buffer.position(offsetInChunk)
+            buffer.put(data, currentSrcOffset, toWrite)
+            buffer.position(prevPos)
+
+            currentSrcOffset += toWrite
+            currentDstAddr += toWrite
+            bytesRemaining -= toWrite
         }
     }
 
-    // Read byte block from Virtual Memory
+    // Read byte block from Virtual Memory with fast block transfers
     fun readBytes(startAddress: Long, length: Int): ByteArray {
         val result = ByteArray(length)
-        for (i in 0 until length) {
-            result[i] = read8(startAddress + i).toByte()
+        var bytesRemaining = length
+        var currentDstOffset = 0
+        var currentSrcAddr = startAddress
+
+        while (bytesRemaining > 0) {
+            val offsetInChunk = (currentSrcAddr and 0xFFFFL).toInt()
+            val spaceInChunk = CHUNK_SIZE - offsetInChunk
+            val toRead = minOf(bytesRemaining, spaceInChunk)
+
+            val resolved = resolveAddress(currentSrcAddr, createIfMissing = false)
+            if (resolved != null) {
+                val (buffer, _) = resolved
+                val prevPos = buffer.position()
+                buffer.position(offsetInChunk)
+                buffer.get(result, currentDstOffset, toRead)
+                buffer.position(prevPos)
+            }
+
+            currentDstOffset += toRead
+            currentSrcAddr += toRead
+            bytesRemaining -= toRead
         }
         return result
     }
